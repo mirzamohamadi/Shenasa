@@ -1,0 +1,590 @@
+openapi: 3.0.3
+info:
+  title: Kanidm endpoints used by Shenasa
+  version: "0.1.0"
+  description: |
+    Reference for the Kanidm HTTP endpoints the Shenasa client calls.
+
+    **CRITICAL layout rule:** OIDC/OAuth2 endpoints live at the
+    **origin root**, NOT under `/v1`:
+
+    * `<origin>/ui/oauth2` — the browser authorise page (what the discovery
+      document publishes as `authorization_endpoint`; the machine endpoint
+      `/oauth2/authorise` — British spelling — answers JSON/401, no login UI)
+    * `<origin>/oauth2/token`
+    * `<origin>/oauth2/openid/<client_id>/.well-known/openid-configuration`
+
+    Only the REST API lives under `<origin>/v1`, including the stepped
+    `/v1/auth` flow Shenasa uses for passkey sign-in. Shenasa computes the
+    OAuth base by stripping a trailing `/v1` from the configured `apiUrl`.
+
+    Kanidm's REST surface is versioned by the server itself (`/v1`); a few
+    operations below are explicitly version-dependent — they are marked and
+    Shenasa degrades gracefully (501-style messaging) when a server does not
+    expose them.
+  license:
+    name: MIT
+servers:
+  - url: https://idm.example.com
+    description: Kanidm origin root (OAuth2, OIDC discovery, session/passkey)
+  - url: https://idm.example.com/v1
+    description: Kanidm REST API (everything under /v1)
+
+tags:
+  - name: auth
+    description: OIDC/OAuth2 + WebAuthn session endpoints (origin root)
+  - name: people
+  - name: groups
+  - name: credentials
+  - name: self
+
+paths:
+  /ui/oauth2:
+    get:
+      tags: [auth]
+      summary: Browser authorise page — Authorization Code + PKCE (Kanidm's authorization_endpoint; the JSON variant is /oauth2/authorise)
+      parameters:
+        - { name: client_id, in: query, required: true, schema: { type: string } }
+        - { name: redirect_uri, in: query, required: true, schema: { type: string } }
+        - { name: response_type, in: query, required: true, schema: { type: string, enum: [code] } }
+        - { name: scope, in: query, required: true, schema: { type: string, example: "openid profile email groups" } }
+        - { name: state, in: query, required: true, schema: { type: string } }
+        - { name: nonce, in: query, schema: { type: string } }
+        - { name: code_challenge, in: query, required: true, schema: { type: string } }
+        - { name: code_challenge_method, in: query, required: true, schema: { type: string, enum: [S256] } }
+      responses:
+        "302": { description: "Redirect to redirect_uri with ?code=&state= (permitted, session present)" }
+        "200": { description: "Kanidm login or consent page (authentication/consent required)" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /oauth2/token:
+    post:
+      tags: [auth]
+      summary: Token endpoint (origin root — never /v1/oauth2/token)
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [grant_type, code, redirect_uri, client_id, code_verifier]
+              properties:
+                grant_type: { type: string, enum: [authorization_code] }
+                code: { type: string }
+                redirect_uri: { type: string }
+                client_id: { type: string }
+                code_verifier: { type: string, description: PKCE verifier (S256) }
+      responses:
+        "200":
+          description: Token set. id_token claims include sub, preferred_username, displayname, name, email, groups (SPNs).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /oauth2/openid/{client_id}/.well-known/openid-configuration:
+    get:
+      tags: [auth]
+      summary: Per-client OIDC discovery document (origin root)
+      parameters:
+        - { name: client_id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Discovery document (issuer, endpoints, jwks) }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/auth:
+    post:
+      tags: [auth]
+      summary: >-
+        Step-based interactive authentication — also the passkey sign-in
+        mechanism: init (account name) -> begin "passkey" (server returns a
+        WebAuthn request challenge) -> cred { passkey: <assertion> }.
+        Steps share a cookie-based auth session; success returns a bearer
+        session token usable against /v1.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthRequest"
+            examples:
+              init: { value: { step: { init: idm_admin } } }
+              begin: { value: { step: { begin: password } } }
+              cred: { value: { step: { cred: { password: "..." } } } }
+      responses:
+        "200":
+          description: "Auth state machine response; final state carries the session token. Cookies must persist between steps."
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessionid: { type: string }
+                  state: { type: object }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/person:
+    get:
+      tags: [people]
+      summary: List persons
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Persons (entries are multi-valued attribute maps)
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Entry" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [people]
+      summary: Create a person
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Entry" }
+            example:
+              attrs:
+                name: [jane]
+                displayname: [Jane Doe]
+                mail: [jane@example.com]
+                account_valid_from: ["2026-01-01T00:00:00Z"]
+      responses:
+        "200": { description: Created }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/person/{id}:
+    get:
+      tags: [people]
+      summary: Read a person by name/UUID
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/entryId" }]
+      responses:
+        "200":
+          description: The person entry
+          content: { application/json: { schema: { $ref: "#/components/schemas/Entry" } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [people]
+      summary: Update a person (attribute values replaced)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/entryId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Entry" }
+      responses:
+        "200": { description: Updated }
+        "400": { $ref: "#/components/responses/BadRequest" }
+    delete:
+      tags: [people]
+      summary: Soft-delete a person (moves to the recycle bin)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/entryId" }]
+      responses:
+        "200": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/person/{id}/_credential/_update_intent/{ttl}:
+    get:
+      tags: [credentials]
+      summary: Begin a credential-reset intent for a user (service-desk flow)
+      description: >-
+        Kanidm 1.10 exposes this mutating operation as a GET (the upstream
+        route carries a "TODO: this shouldn't be a get" remark). Returns
+        CUIntentToken { token, expiry_time } — the link to share with the
+        user is <origin>/ui/reset?token=<token>.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/entryId" }
+        - { name: ttl, in: path, required: true, schema: { type: integer }, description: Validity in seconds }
+      responses:
+        "200": { description: "CUIntentToken JSON: { token, expiry_time }" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/group:
+    get:
+      tags: [groups]
+      summary: List groups
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Groups
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Entry" } }
+    post:
+      tags: [groups]
+      summary: Create a group
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Entry" }
+      responses:
+        "200": { description: Created }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/group/{id}:
+    get:
+      tags: [groups]
+      summary: Read a group
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/entryId" }]
+      responses:
+        "200":
+          description: The group entry (members are in the multi-valued `member` attribute; nested groups appear as members)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Entry" } } }
+    patch:
+      tags: [groups]
+      summary: Update a group (displayname, entry_managed_by, ...)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/entryId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Entry" }
+      responses:
+        "200": { description: Updated }
+    delete:
+      tags: [groups]
+      summary: Delete a group
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/entryId" }]
+      responses:
+        "200": { description: Deleted }
+
+  /v1/group/{id}/_attr/member:
+    post:
+      tags: [groups]
+      summary: Add members (persons or groups — supports nesting)
+      description: Kanidm attribute operations — POST extends the attribute's values.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/entryId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: array, items: { type: string }, example: ["jane@idm.example.com"] }
+      responses:
+        "200": { description: Members added }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [groups]
+      summary: Remove members
+      description: DELETE removes the listed values from the attribute.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/entryId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: array, items: { type: string } }
+      responses:
+        "200": { description: Members removed }
+
+  /v1/self:
+    get:
+      tags: [self]
+      summary: Read the authenticated caller's own entry
+      description: >-
+        IMPORTANT: the response is NOT a bare entry — Kanidm 1.10 answers
+        WhoamiResponse `{"youare": {"attrs": {...}}}` (proto/src/v1/mod.rs).
+        The entry includes `memberof` (the builtin idm_acp_self_read ACP
+        grants MemberOf on one's own entry), which makes it the server's
+        authoritative source of the caller's role set.
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      responses:
+        "200":
+          description: WhoamiResponse wrapping the caller's entry (attributes include memberof)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  youare: { $ref: "#/components/schemas/Entry" }
+                required: [youare]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/self/_uat:
+    get:
+      tags: [self]
+      summary: Read the current session's UserAuthToken
+      description: >-
+        Returns session_id, issued_at, expiry, purpose, spn, displayname
+        (proto/src/internal/token.rs). Kanidm 1.10 has no endpoint to list
+        or revoke other sessions; sign-out is performed via GET /ui/logout.
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      responses:
+        "200":
+          description: The current session token view
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  session_id: { type: string }
+                  issued_at: { type: string }
+                  expiry: { type: string, nullable: true }
+                  purpose: {}
+                  spn: { type: string }
+                  displayname: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/reauth:
+    post:
+      tags: [self]
+      summary: Step-up authentication — unlock a short write window
+      description: >-
+        Begins a re-auth session for a PRIVILEGE-CAPABLE session
+        (reauth.rs). Request body is AuthIssueSession serialized as a bare
+        string ("token" or "cookie"). The response is a stepped-auth state
+        (choose/continue) like /v1/auth; the client completes the passkey
+        ceremony via POST /v1/auth, and on success the server reissues the
+        UAT as ReadWrite{expiry: now + privilege_expiry} (server default
+        600s). Writes are otherwise denied 403 on interactive sessions:
+        those UATs are ReadWrite{expiry: None}, which
+        process_uat_to_identity maps to AccessScope::ReadOnly, and the
+        access layer rejects any write before role evaluation. Shenasa's
+        "Unlock write access" feature wraps this flow.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: string, enum: [token, cookie] }
+      responses:
+        "200": { description: Stepped-auth state (choose/continue/success/denied) }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /ui/logout:
+    get:
+      tags: [self]
+      summary: End the identity-server session (used by Shenasa's sign-out)
+      description: >-
+        Kanidm 1.10's view_logout_get (https/views/login.rs) calls
+        handle_logout AND always destroys the bearer-token, auth-session,
+        oauth2-request and credential-update cookies, then redirects to the
+        Kanidm login page. Shenasa fetches it same-origin with
+        credentials:include — or navigates to it top-level in two-domain
+        deployments — because clearing local browser state alone leaves the
+        Kanidm SSO session alive.
+      responses:
+        "303": { description: Redirect to the Kanidm login page after logout }
+
+  /v1/recycle_bin:
+    get:
+      tags: [recycle]
+      summary: List recycled (soft-deleted) entries
+      description: >-
+        Requires the idm_recycle_bin_admins role (builtin ACP
+        idm_acp_recycle_bin_search). Returns entries with class/name/uuid —
+        note idm_admins / idm_people_admins do NOT see the recycle bin.
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      responses:
+        "200":
+          description: Recycled entries
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Entry" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/recycle_bin/{id}/_revive:
+    post:
+      tags: [recycle]
+      summary: Revive a recycled entry (no request body)
+      description: >-
+        Requires idm_recycle_bin_admins (idm_acp_recycle_bin_revive). There
+        is no REST purge endpoint — the server purges recycled entries on
+        its own schedule.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      responses:
+        "200": { description: Entry revived }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /ui/reset:
+    get:
+      tags: [credentials]
+      summary: Kanidm's own credential-reset page (Shenasa only constructs this link)
+      description: >-
+        Kanidm 1.10 has no plain webauthn REST endpoints — credential
+        enrolment happens inside its audited credential manager, reached via
+        a one-time intent token: <origin>/ui/reset?token=<intent>.
+        Shenasa issues the intent with GET
+        /v1/person/{id}/_credential/_update_intent/{ttl} and hands the link
+        to the operator to share.
+      parameters:
+        - { name: token, in: query, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Credential update UI }
+
+  /ui/update_credentials:
+    get:
+      tags: [credentials]
+      summary: Kanidm's self-service credential manager (deep-linked from the profile page)
+      description: >-
+        Signed-in users enrol passkeys/TOTP here. Shenasa opens this in a new
+        tab instead of re-implementing Kanidm's credential-update session
+        protocol (/v1/credential/_update, _status, _commit).
+      responses:
+        "200": { description: Credential manager UI }
+
+  /v1/oauth2/_public:
+    post:
+      tags: [auth]
+      summary: Create a public OAuth2 resource server (PKCE, no secret)
+      description: Used by deploy/bootstrap.sh.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Entry" }
+            example:
+              attrs:
+                oauth2_rs_name: [shenasa_admin_ui]
+                displayname: [Shenasa Admin UI]
+      responses:
+        "200": { description: Created }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/oauth2/{id}:
+    get:
+      tags: [auth]
+      summary: Read an OAuth2 resource server
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/entryId" }]
+      responses:
+        "200":
+          description: Resource server entry
+          content: { application/json: { schema: { $ref: "#/components/schemas/Entry" } } }
+    patch:
+      tags: [auth]
+      summary: Configure redirect URLs, origins and scope maps
+      description: |
+        Key attributes:
+        * `oauth2_rs_origin_landing` — allowed redirect URLs (exact match).
+        * `oauth2_rs_origin` — the OAuth2 origin (scheme://host).
+        * `oauth2_rs_scope_map` — `group_spn:scope1,scope2,…` mapping group
+          members to scopes. The built-in `groups` scope emits the `groups`
+          claim (group SPNs) in tokens — Shenasa derives UI roles from it.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/entryId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Entry" }
+      responses:
+        "200": { description: Updated }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: "Authorization: Bearer <access_token> from the OIDC code flow"
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: kanidm-session
+      description: Session cookie (passkey sign-in / interactive flows)
+
+  parameters:
+    entryId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+      description: Entry name or UUID
+
+  schemas:
+    Entry:
+      type: object
+      description: Kanidm entries use multi-valued attribute maps.
+      properties:
+        attrs:
+          type: object
+          additionalProperties:
+            type: array
+            items: {}
+      example:
+        attrs:
+          name: [jane]
+          displayname: [Jane Doe]
+          mail: [jane@example.com]
+          uuid: ["b1f6…"]
+          memberof: ["idm_people_admins@idm.example.com"]
+    TokenResponse:
+      type: object
+      properties:
+        access_token: { type: string, description: Stored in-memory; used as Bearer for /v1 calls }
+        id_token: { type: string, description: "JWT; claims: sub, preferred_username, displayname, name, email, groups (SPNs)" }
+        token_type: { type: string, example: Bearer }
+        expires_in: { type: integer }
+    SerializedCredential:
+      type: object
+      description: PublicKeyCredential serialised for JSON transport (base64url fields).
+      properties:
+        id: { type: string }
+        rawId: { type: string }
+        type: { type: string, example: public-key }
+        response:
+          type: object
+          properties:
+            clientDataJSON: { type: string }
+            attestationObject: { type: string }
+            authenticatorData: { type: string }
+            signature: { type: string }
+            userHandle: { type: string, nullable: true }
+    AuthRequest:
+      type: object
+      description: Step-based auth state machine request.
+      properties:
+        step:
+          type: object
+          properties:
+            init: { type: string, description: Username }
+            begin: { type: string, enum: [password, passkey], description: Mechanism }
+            cred:
+              type: object
+              properties:
+                password: { type: string }
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorBody" }
+    Unauthorized:
+      description: Unauthenticated / session expired. Shenasa normalises this to ApiError(401, "session expired", "401").
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorBody" }
+    Forbidden:
+      description: Authenticated but not authorised (Kanidm enforces RBAC server-side)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorBody" }
+    NotFound:
+      description: Entry not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorBody" }
+    Conflict:
+      description: Duplicate entry / constraint conflict
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorBody" }
+    ErrorBody:
+      type: object
+      properties:
+        message: { type: string }

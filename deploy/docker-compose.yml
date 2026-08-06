@@ -1,0 +1,57 @@
+# Shenasa + Kanidm deployment.
+#
+# Topology A (single-origin, default): Kanidm and Shenasa share one domain;
+# Caddy serves the SPA under /admin/ and proxies everything else to Kanidm.
+# Topology B (two-domain): add a second virtual host for the SPA domain in
+# out/Caddyfile (see examples in deploy/Caddyfile.example) — Caddy serves
+# the SPA on its own domain and can also reverse-proxy the API paths so no
+# cross-origin requests are needed at all.
+#
+# Quick start:  bash deploy/setup.sh idm.example.com
+services:
+  kanidm:
+    # Pinned to the exact Kanidm release Shenasa is verified against
+    # (every endpoint contract in this repo was checked against the
+    # v1.10.5 source). NOTE: Docker Hub tags have NO "v" prefix
+    # (kanidm/server:1.10.5 exists; :v1.10.5 does not) — "v" is only the
+    # upstream git tag format. Upgrade DELIBERATELY after reading upstream
+    # release notes — tracking :latest silently changes your identity
+    # server's behaviour and audit surface on every pull (:latest currently
+    # tracks the 1.12.0-dev builds, not a stable release).
+    image: kanidm/server:1.10.5
+    container_name: shenasa-kanidm
+    restart: unless-stopped
+    environment:
+      KANIDM_ACCEPT_INVALID_CERTS: "false"
+    volumes:
+      - ./out/server.toml:/data/server.toml:ro
+      - ./tls:/data/tls:ro
+      - kanidm_data:/data
+    ports:
+      # Localhost-only: Caddy is the sole public ingress (proxies to this
+      # port). Never publish the admin API/UI directly to the network.
+      - "127.0.0.1:8443:8443"
+      # Uncomment to expose LDAP(S) to the network.
+      # - "3636:3636"
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: shenasa-caddy
+    restart: unless-stopped
+    depends_on:
+      kanidm:
+        condition: service_started
+    volumes:
+      - ./out/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./ui:/srv/shenasa:ro
+      - ./tls:/srv/tls:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    ports:
+      - "80:80"
+      - "443:443"
+
+volumes:
+  kanidm_data:
+  caddy_data:
+  caddy_config:

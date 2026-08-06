@@ -1,0 +1,21 @@
+# Standalone SPA server for the shenasa-ui container image.
+# Serves only the static SPA with hardened headers on :80.
+{
+	admin off
+	auto_https off
+}
+
+:80 {
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+		-Server
+	}
+	root * /srv/shenasa
+	try_files {path} /index.html
+	file_server
+}

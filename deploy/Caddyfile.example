@@ -1,0 +1,132 @@
+# Caddyfile for Shenasa + Kanidm.
+# Rendered by deploy/setup.sh: SHENASA_DOMAIN and SHENASA_UI_DOMAIN are
+# replaced with real values. Keep only the vhost(s) matching your topology.
+#
+# Topology A — single-origin: Kanidm + Shenasa on the same domain, the SPA
+#              served under /admin/.
+# Topology B — two-domain:     Kanidm on idm.example.com and Shenasa on
+#              shenasa.example.com.
+
+{
+	# admin email for ACME (used when no local certificate is configured)
+	email admin@SHENASA_DOMAIN
+}
+
+(security_headers) {
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
+		-Server
+	}
+}
+
+(spa_csp) {
+	# SPA Content-Security-Policy: self-hosted scripts only.
+	header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+}
+
+# ---------------------------------------------------------------------------
+# Topology A (single-origin): https://SHENASA_DOMAIN serves Kanidm, and the
+# Shenasa SPA under /admin/.
+#   SPA URL:    https://SHENASA_DOMAIN/admin/
+#   API URL:    https://SHENASA_DOMAIN/v1        (passed to the SPA as apiUrl)
+#   Redirect:   https://SHENASA_DOMAIN/admin/    (OIDC landing on the SPA)
+# ---------------------------------------------------------------------------
+https://SHENASA_DOMAIN {
+	import security_headers
+
+	# The SPA uses relative asset paths, so it only works with the trailing
+	# slash. Without this redirect, "/admin" renders a blank page (assets
+	# resolve to /js/... and 404 on the Kanidm proxy). redir sorts before
+	# handle in Caddy's default directive order.
+	redir /admin /admin/ 308
+
+	# SPA under /admin/
+	@admin path /admin/*
+	handle @admin {
+		import spa_csp
+		uri strip_prefix /admin
+		root * /srv/shenasa
+		try_files {path} /index.html
+		file_server
+	}
+
+	# Everything else is Kanidm (its own UI, /v1, /oauth2, /_session,
+	# /.well-known, LDAP-less HTTP). Kanidm sets its strict headers itself.
+	handle {
+		reverse_proxy kanidm:8443 {
+			transport http {
+				tls
+				tls_server_name SHENASA_DOMAIN
+				# If Kanidm's certificate was issued by a private CA, trust it:
+				# tls_trusted_ca_certs /srv/tls/ca.pem
+			}
+		}
+	}
+
+	# Use a local certificate if setup.sh generated one (comment these two
+	# lines to let Caddy obtain ACME certificates automatically).
+	tls /srv/tls/chain.pem /srv/tls/key.pem
+}
+
+# ---------------------------------------------------------------------------
+# Topology B (two-domain): remove the vhost above, then use this vhost for
+# the SPA on its own domain. The API paths are reverse-proxied here too, so
+# the SPA still talks to a same-origin /v1 (recommended — no CORS needed).
+#   SPA URL:    https://SHENASA_UI_DOMAIN/
+#   API URL:    https://SHENASA_UI_DOMAIN/v1
+#   Redirect:   https://SHENASA_UI_DOMAIN/
+# ---------------------------------------------------------------------------
+https://SHENASA_UI_DOMAIN {
+	import security_headers
+	import spa_csp
+
+	# Same-origin proxy for the API/OAuth paths (avoids CORS entirely).
+	@api path /v1/* /oauth2/* /_session/* /.well-known/*
+	handle @api {
+		reverse_proxy kanidm:8443 {
+			transport http {
+				tls
+				tls_server_name SHENASA_DOMAIN
+			}
+		}
+	}
+
+	handle {
+		root * /srv/shenasa
+		try_files {path} /index.html
+		file_server
+	}
+
+	tls /srv/tls/chain.pem /srv/tls/key.pem
+}
+
+# ---------------------------------------------------------------------------
+# Topology B (true cross-origin variant): if you prefer the SPA to call
+# https://SHENASA_DOMAIN directly (apiUrl = https://SHENASA_DOMAIN/v1), the
+# Kanidm vhost must answer CORS for the SPA origin. Add this inside the
+# https://SHENASA_DOMAIN vhost, BEFORE the reverse_proxy handle block:
+#
+#	@cors_preflight {
+#		method OPTIONS
+#		header Origin https://SHENASA_UI_DOMAIN
+#	}
+#	handle @cors_preflight {
+#		header Access-Control-Allow-Origin "https://SHENASA_UI_DOMAIN"
+#		header Access-Control-Allow-Credentials "true"
+#		header Access-Control-Allow-Methods "GET, POST, PATCH, PUT, DELETE, OPTIONS"
+#		header Access-Control-Allow-Headers "Authorization, Content-Type, Accept"
+#		header Access-Control-Max-Age "3600"
+#		respond 204
+#	}
+#	@cors header Origin https://SHENASA_UI_DOMAIN
+#	@cors_bypass not path /v1/* /oauth2/* /_session/* /.well-known/*
+#
+# then in the API handle: add the same Allow-Origin/Allow-Credentials headers
+# via `header` inside the reverse_proxy handle for @cors requests.
+# NOTE: keep Access-Control-Allow-Origin pinned to your exact SPA origin —
+# never use "*" together with Allow-Credentials.
+# ---------------------------------------------------------------------------

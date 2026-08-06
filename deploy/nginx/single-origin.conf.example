@@ -1,0 +1,57 @@
+# nginx — Topology A (single-origin): Kanidm + Shenasa on the same domain,
+# with Shenasa served under /admin/.
+#
+#   SPA URL:  https://idm.example.com/admin/
+#   apiUrl:   https://idm.example.com/v1
+#   OIDC redirect URI: https://idm.example.com/admin/
+#
+# Deploy the SPA files to /var/www/shenasa (index.html, css/, js/).
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name idm.example.com;
+
+    ssl_certificate     /etc/nginx/tls/idm.example.com.fullchain.pem;
+    ssl_certificate_key /etc/nginx/tls/idm.example.com.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_session_timeout 1d;
+    ssl_session_cache   shared:TLS:10m;
+    ssl_prefer_server_ciphers off;
+
+    # ---- Security headers (nginx merges add_header from server level) ----
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header Permissions-Policy "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()" always;
+
+    # ---- Shenasa SPA under /admin/ ----
+    location = /admin {
+        return 301 /admin/;
+    }
+    location /admin/ {
+        alias /var/www/shenasa/;
+        index index.html;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+        try_files $uri $uri/ /admin/index.html;
+    }
+
+    # ---- Everything else proxies to Kanidm (its own UI, /v1, /oauth2,
+    # ---- /_session, /.well-known). Kanidm speaks TLS; verify upstream. ----
+    location / {
+        proxy_pass https://kanidm:8443;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_ssl_server_name on;
+        proxy_ssl_name idm.example.com;
+        # Trust the CA that issued Kanidm's certificate:
+        proxy_ssl_trusted_certificate /etc/nginx/tls/kanidm-ca.pem;
+        proxy_ssl_verify on;
+        proxy_ssl_verify_depth 2;
+        proxy_ssl_session_reuse on;
+        client_max_body_size 10m;
+    }
+}

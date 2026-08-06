@@ -1,0 +1,38 @@
+{
+  "name": "shenasa",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Shenasa — a modern administration UI for the Kanidm identity management server. Dependency-free static SPA, no build step.",
+  "license": "MIT",
+  "author": "Mohammad Mirzamohammadi",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mirzamohamadi/shenasa.git"
+  },
+  "bugs": "https://github.com/mirzamohamadi/shenasa/issues",
+  "homepage": "https://github.com/mirzamohamadi/shenasa",
+  "keywords": [
+    "kanidm",
+    "identity-management",
+    "admin-ui",
+    "webauthn",
+    "passkeys",
+    "fido2",
+    "oidc",
+    "rbac",
+    "single-page-application",
+    "vanilla-js"
+  ],
+  "devDependencies": {
+    "jsdom": "^25.0.1"
+  },
+  "scripts": {
+    "start": "node scripts/serve.js",
+    "lint": "node scripts/check-syntax.js",
+    "test": "node test/smoke.test.js",
+    "check": "node scripts/check-syntax.js && node test/smoke.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

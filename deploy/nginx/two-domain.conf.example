@@ -1,0 +1,100 @@
+# nginx — Topology B (two-domain): Kanidm on idm.example.com, Shenasa on
+# shenasa.example.com.
+#
+# Two operating modes:
+#   (1) RECOMMENDED — no CORS: the SPA vhost also reverse-proxies /v1,
+#       /oauth2, /_session and /.well-known, so the browser only ever talks
+#       to shenasa.example.com. Use apiUrl=https://shenasa.example.com/v1.
+#   (2) True cross-origin: apiUrl=https://idm.example.com/v1. This NEEDS
+#       CORS on the Kanidm vhost (shown at the bottom), pinned to the exact
+#       SPA origin.
+
+# ---------------------------------------------------------------------------
+# Kanidm vhost
+# ---------------------------------------------------------------------------
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name idm.example.com;
+
+    ssl_certificate     /etc/nginx/tls/idm.example.com.fullchain.pem;
+    ssl_certificate_key /etc/nginx/tls/idm.example.com.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header Permissions-Policy "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()" always;
+
+    # --- Mode (2) only: CORS for the exact SPA origin, incl. preflight. ---
+    # Never use "*" together with allow-credentials.
+    set $cors_origin "";
+    if ($http_origin = "https://shenasa.example.com") {
+        set $cors_origin $http_origin;
+    }
+    add_header Access-Control-Allow-Origin $cors_origin always;
+    add_header Access-Control-Allow-Credentials "true" always;
+    add_header Access-Control-Allow-Methods "GET, POST, PATCH, PUT, DELETE, OPTIONS" always;
+    add_header Access-Control-Allow-Headers "Authorization, Content-Type, Accept" always;
+    add_header Access-Control-Max-Age "3600" always;
+
+    location / {
+        # Preflight short-circuit (mode 2 only; harmless in mode 1).
+        if ($request_method = OPTIONS) {
+            return 204;
+        }
+        proxy_pass https://kanidm:8443;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_ssl_server_name on;
+        proxy_ssl_name idm.example.com;
+        proxy_ssl_trusted_certificate /etc/nginx/tls/kanidm-ca.pem;
+        proxy_ssl_verify on;
+        proxy_ssl_session_reuse on;
+        client_max_body_size 10m;
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Shenasa SPA vhost
+# ---------------------------------------------------------------------------
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name shenasa.example.com;
+
+    ssl_certificate     /etc/nginx/tls/shenasa.example.com.fullchain.pem;
+    ssl_certificate_key /etc/nginx/tls/shenasa.example.com.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header Permissions-Policy "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+
+    root /var/www/shenasa;
+    index index.html;
+
+    # Mode (1): same-origin proxy for API/OAuth paths — no CORS required.
+    location ~ ^/(v1|oauth2|_session|\.well-known)(/|$) {
+        proxy_pass https://kanidm:8443;
+        proxy_http_version 1.1;
+        proxy_set_header Host idm.example.com;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_ssl_server_name on;
+        proxy_ssl_name idm.example.com;
+        proxy_ssl_trusted_certificate /etc/nginx/tls/kanidm-ca.pem;
+        proxy_ssl_verify on;
+        client_max_body_size 10m;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

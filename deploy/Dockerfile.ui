@@ -1,0 +1,20 @@
+# Dockerfile.ui — build a static Shenasa SPA image (Caddy-based).
+# The UI is build-step-free, so this image only copies static files.
+#
+#   docker build -f deploy/Dockerfile.ui -t shenasa-ui:latest .
+#   docker run --rm -p 8080:80 shenasa-ui:latest
+#
+# Context must be the repository ROOT (so COPY can reach js/, css/, index.html).
+
+FROM caddy:2-alpine
+
+WORKDIR /srv/shenasa
+COPY index.html ./
+COPY css/ ./css/
+COPY js/ ./js/
+COPY deploy/Caddyfile.ui /etc/caddy/Caddyfile
+
+EXPOSE 80
+
+HEALTHCHECK --interval=30s --timeout=3s \
+  CMD wget -q -O /dev/null http://127.0.0.1/ || exit 1

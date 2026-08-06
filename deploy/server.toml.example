@@ -1,0 +1,55 @@
+# Kanidm server configuration for Shenasa deployments.
+# Rendered by deploy/setup.sh (SHENASA_DOMAIN tokens are replaced).
+# Reference: https://kanidm.github.io/kanidm/stable/server_admin/config.html
+
+# HTTPS listener (Kanidm always serves TLS; put Caddy/nginx in front for
+# public traffic and certificate management).
+bindaddress = "0.0.0.0:8443"
+
+# LDAP listener (optional; comment the line out to disable LDAP).
+ldapbindaddress = "0.0.0.0:3636"
+
+# The domain Kanidm is authoritative for. Cookies and SPN suffixes derive
+# from this value.
+domain = "SHENASA_DOMAIN"
+
+# The URL users type to reach the server (scheme + host, no path).
+origin = "https://SHENASA_DOMAIN"
+
+# Database location inside the container/volume.
+db_path = "/data/kanidm.db"
+
+# TLS material (see deploy/setup.sh — a local CA is generated for quick
+# starts; use publicly-trusted certificates for production).
+tls_chain = "/data/tls/chain.pem"
+tls_key = "/data/tls/key.pem"
+
+# Logging. Use "info" in production ("trace" measurably slows the hot paths).
+log_level = "info"
+
+# Nightly online backups (recommended).
+# online_backup = { path = "/data/backups", schedule = "00 22 * * *", versions = 7 }
+
+# ---- Performance (enterprise tuning, all optional) ----------------------
+# All keys below are verified against Kanidm v1.10.5
+# (server/core/src/config.rs). Every key can also be set with a
+# KANIDM_-prefixed environment variable, e.g. KANIDM_THREAD_COUNT=8.
+#
+# Async worker-pool threads. Defaults to the host's available parallelism.
+# Docker CPU limits are not always visible to that heuristic — inside a
+# container, set this explicitly to the container's vCPU count.
+# thread_count = 8
+#
+# Tell Kanidm the real host filesystem ("zfs" or "generic") for optimal LMDB
+# behaviour. Run `kanidmd vacuum` once after changing it.
+# db_fs_type = "zfs"
+#
+# Trust X-Forwarded-For from the reverse proxy, so audit logs see real
+# client IPs. Enable ONLY when the proxy is the sole ingress path (in this
+# deployment :8443 is bound to localhost/Docker-internal). If the port is
+# directly reachable, clients could spoof their IP — leave it off then.
+# trust_x_forward_for = true
+
+# SECURITY: never enable Kanidm's TLS-verification bypass for clients, and
+# never ship PKCE-disabled OAuth2 clients. This file intentionally contains
+# no "tls_insecure_skip_verify" option — verification stays ON.
