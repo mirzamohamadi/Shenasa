@@ -5,8 +5,9 @@ plus a field-tested **RBAC & tiering best practice** model you can adopt as
 your organisation's delegation standard.
 
 - Audience: identity administrators, service-desk staff, security engineers.
-- Applies to: **Shenasa v1.0.0** with **Kanidm server 1.10.x**
-  (recommended 1.10.5 — see the Compatibility table in the README).
+- Applies to: **Shenasa v1.0.0** with **Kanidm server 1.10.x or 1.11.x**
+  (recommended 1.10.5 / verified 1.11.0 — see the Compatibility table in
+  the README; the server version is auto-detected and badged in Settings).
 - Everything below is verified against the Kanidm 1.10 behaviour; where the
   server is the source of truth (and it always is), the server file is
   named so you can check for yourself.
@@ -128,7 +129,41 @@ pipeline instead of faking a page.
   only ordinary groups; `idm_*` role groups are entry-managed by
   `idm_admins`; system groups by `idm_access_control_admins`.
 
-### 3.5 Recycle bin
+### 3.5 Apps (OAuth2/OIDC clients)
+
+Requires `idm_oauth2_admins`. One client per SSO application.
+
+- **List** with public/basic badges; **New client**: choose **public**
+  (browser/SPA/native — PKCE, no secret) or **basic** (server-side app —
+  authenticates with a client secret), client id (becomes the OIDC
+  `client_id`), display name, landing URL (https — Kanidm builds the
+  strict redirect list from it).
+- **Detail**: edit display name/landing; **Strict redirect URI** toggle
+  (keep ON — exact matching; off = prefix matching, legacy only);
+  **redirect origins** add/remove; **scope maps** / **supplementary scope
+  maps** / **claim maps** add-update-remove per group (e.g. give group
+  `app-users` the scopes `openid profile email groups`); **basic secret**
+  reveal for confidential clients (copy it into your vault — it is a
+  password for that application).
+- Deleting a client kills its sign-ins immediately — the danger zone asks
+  for confirmation.
+
+### 3.6 Service accounts
+
+Requires `idm_service_account_admins`. One account per integration/robot,
+never a shared human account.
+
+- **New service account**: name, display name, and the required
+  **managed-by group** (the server rejects accounts without one).
+- **API tokens**: list shows label, read-only/read-write badge, issued
+  and expiry dates; **Issue token** — label, optional expiry (empty =
+  never expires; schedule rotation instead), read-write checkbox (grant
+  only when the integration truly writes), compact (shorter token for
+  header-size-limited systems). **The full token is shown exactly once** —
+  copy it or scan the QR into your vault immediately. **Delete** a token
+  to cut an integration's access instantly.
+
+### 3.7 Recycle bin
 
 - Lists soft-deleted entries (`GET /v1/recycle_bin`), **Revive** restores
   by UUID (`POST /v1/recycle_bin/{id}/_revive`). Requires
@@ -139,20 +174,20 @@ pipeline instead of faking a page.
   the web routes, not in the official client, not in the CLI) — so Shenasa
   deliberately documents this instead of offering a dead button.
 
-### 3.6 Sessions
+### 3.8 Sessions
 
 Shows **your current session** decoded from `GET /v1/self/_uat`: token id,
 issued-at, expiry, purpose — including the **write window** state with its
 own unlock button like the top-bar chip. Kanidm 1.10 exposes no endpoint to
 list or revoke *other* sessions, so none is shown.
 
-### 3.7 Profile (self-service)
+### 3.9 Profile (self-service)
 
 Edit your own e-mail (role-gated), register an additional passkey
 (deep-link into Kanidm's credential manager), change password, view your
 groups and sign-in method.
 
-### 3.8 Settings
+### 3.10 Settings
 
 Connection (apiUrl, OIDC client id/scope/redirect URI) with a **Test
 connection** button that queries the client's discovery document (which
@@ -227,7 +262,7 @@ mirrors in its UI gates and group capability notes.
 | `idm_group_admins` | Create/modify/delete **ordinary** groups and their members | `idm_admins` |
 | `idm_service_desk` | Service-desk powers (credential-reset intents, …) | `idm_admins` |
 | `idm_recycle_bin_admins` | Search/revive recycle bin | `idm_admins` |
-| `idm_oauth2_client_admins` | Manage OAuth2/OIDC clients (your ~50 apps) | `idm_admins` |
+| `idm_oauth2_admins` | Manage OAuth2/OIDC clients (your ~50 apps) | `idm_admins` |
 | `idm_schema_admins`, `idm_high_privilege`, … | System/schema level | `idm_access_control_admins` |
 
 The single most common misunderstanding: **`idm_admins` is not
@@ -244,7 +279,7 @@ Adapted from the classic AD tiering to Kanidm's builtin roles:
 | --- | --- | --- | --- | --- |
 | **T0 — Control plane** | Protect the IdM itself: access control, schema, recovery | `idm_access_control_admins`, `idm_schema_admins` (and hold `idm_admin` recovery credentials offline) | Dedicated `a-` admin accounts, passkey-only, hardware keys | 2–3 |
 | **T1 — Identity admins** | Role curation + people/groups lifecycle | `idm_admins`, plus `idm_people_admins` / `idm_group_admins` as needed | Dedicated `a-` accounts, passkey-only | 3–6 |
-| **T2 — Application & helpdesk** | Service desk, OAuth2 clients, recycle bin, PII read | `idm_service_desk`, `idm_oauth2_client_admins`, `idm_recycle_bin_admins`, `idm_people_pii_read` | Can be the daily account for helpdesk; passkey strongly recommended | 5–20 |
+| **T2 — Application & helpdesk** | Service desk, OAuth2 clients, recycle bin, PII read | `idm_service_desk`, `idm_oauth2_admins`, `idm_recycle_bin_admins`, `idm_people_pii_read` | Can be the daily account for helpdesk; passkey strongly recommended | 5–20 |
 | **T3 — Workforce** | Ordinary users of the ~50 apps | Ordinary business groups (`app-*`, `dept-*`) managed by T1/T2 | Daily accounts | everyone |
 
 ### 5.3 Hard rules (adopt as policy)
@@ -266,7 +301,7 @@ Adapted from the classic AD tiering to Kanidm's builtin roles:
    T2), because revive restores privileges too.
 6. **OAuth2 client admin != people admin.** With ~50 SSO apps, one
    mis-clicked redirect URI is a breach. Keep
-   `idm_oauth2_client_admins` tiny and require strict redirect URIs
+   `idm_oauth2_admins` tiny and require strict redirect URIs
    (Shenasa's own client is the template).
 7. **`idm_access_control_admins` is break-glass territory.** 2–3 named
    humans, hardware keys, and a membership review on a calendar. Never a
@@ -288,7 +323,7 @@ Adapted from the classic AD tiering to Kanidm's builtin roles:
 | IdM platform ownership, ACP/schema/HA | `idm_access_control_admins`, `idm_schema_admins` | 2 senior engineers, `a-` accounts |
 | Role curation & user lifecycle | `idm_admins` + `idm_people_admins` + `idm_group_admins` | IAM team leads, `a-` accounts |
 | Password/passkey resets, off-hours | `idm_service_desk` (+ `idm_recycle_bin_admins` for on-call) | Helpdesk (daily accounts OK) |
-| App onboarding, redirect URIs, scopes | `idm_oauth2_client_admins` | App integration team |
+| App onboarding, redirect URIs, scopes | `idm_oauth2_admins` | App integration team |
 | HR reporting (read-only PII) | `idm_people_pii_read` via service account | HR analytics |
 | Business access | `dept-*`, `app-*` ordinary groups (document each via the group Description field!) | T1/T2 maintain |
 
@@ -305,7 +340,7 @@ HTTP 403 on a write?
     ├─ idm_* role-group members? → need idm_admins
     ├─ System group/schema?      → need idm_access_control_admins
     ├─ Recycle bin?              → need idm_recycle_bin_admins
-    └─ OAuth2 clients?           → need idm_oauth2_client_admins
+    └─ OAuth2 clients?           → need idm_oauth2_admins
 ```
 
 Shenasa's error toasts walk you through exactly this tree inline.

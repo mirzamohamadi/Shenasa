@@ -47,6 +47,8 @@
       { hash: '#/dashboard', label: t('nav.dashboard'), show: true },
       { hash: '#/users', label: t('nav.users'), show: global.Store.canManagePeople() || global.Store.canReadPii() },
       { hash: '#/groups', label: t('nav.groups'), show: global.Store.canManageGroups() || global.Store.canEditGroupMembers() || global.Store.canManagePeople() },
+      { hash: '#/apps', label: t('nav.apps'), show: global.Store.canManageOauth2() },
+      { hash: '#/svcaccounts', label: t('nav.svcaccounts'), show: global.Store.canManageServiceAccounts() },
       { hash: '#/recycle', label: t('nav.recycle'), show: global.Store.canRecycleBin() },
       { hash: '#/sessions', label: t('nav.sessions'), show: true },
       { hash: '#/profile', label: t('nav.profile'), show: true },
@@ -292,6 +294,10 @@
         return void (seg[1] ? global.Pages.userDetail(main, seg[1]) : global.Pages.users(main));
       case 'groups':
         return void (seg[1] ? global.Pages.groupDetail(main, seg[1]) : global.Pages.groups(main));
+      case 'apps':
+        return void (seg[1] ? global.Pages.appDetail(main, seg[1]) : global.Pages.apps(main));
+      case 'svcaccounts':
+        return void (seg[1] ? global.Pages.serviceAccountDetail(main, seg[1]) : global.Pages.serviceAccounts(main));
       case 'recycle': return void global.Pages.recycle(main);
       case 'sessions': return void global.Pages.sessions(main);
       case 'profile': return void global.Pages.profile(main);

@@ -1,7 +1,7 @@
 # Shenasa — Admin UI for Kanidm
 
-[![Release](https://img.shields.io/badge/release-v1.0.0-blue)](https://github.com/mirzamohamadi/shenasa/releases)
-[![Kanidm compatibility](https://img.shields.io/badge/Kanidm-1.10.x-blueviolet)](#compatibility)
+[![Release](https://img.shields.io/badge/release-v1.1.0-blue)](https://github.com/mirzamohamadi/shenasa/releases)
+[![Kanidm compatibility](https://img.shields.io/badge/Kanidm-1.10.x%20%7C%201.11.x-blueviolet)](#compatibility)
 [![CI](https://github.com/mirzamohamadi/shenasa/actions/workflows/ci.yml/badge.svg)](https://github.com/mirzamohamadi/shenasa/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
@@ -29,17 +29,26 @@ Kanidm server** through its REST/OIDC/WebAuthn endpoints.
 
 ## Compatibility
 
-**Shenasa v1.0.0 is built for — and verified against — Kanidm server
-`1.10.x`.** The deploy layer pins `kanidm/server:1.10.5`.
+**Shenasa v1.1.0 supports Kanidm server `1.10.x` and `1.11.x`** — verified
+by diffing the v1.10.5 and v1.11.0 source trees. The deploy layer pins
+`kanidm/server:1.11.0` by default; `1.10.5` is the verified alternative (see
+`deploy/README.md` "Running Kanidm 1.11"). `deploy/setup.sh` refuses to ever
+roll the pinned image **backwards** below the tag a host already runs —
+Kanidm migrations are one-way.
 
 | Shenasa | Kanidm server | Status |
 | --- | --- | --- |
-| **v1.0.0** | **1.10.x** (recommended **1.10.5**) | ✅ Supported — every endpoint, auth flow, builtin ACP and error path the UI touches is source-verified against the Kanidm **v1.10.5** tree (see `docs/security-audit-1.0.0.md` and the CHANGELOG for file/line evidence) |
-| v1.0.0 | ≤ 1.9.x | ❌ Unsupported — earlier servers lack parts of the 1.10 REST/auth surface this UI relies on (stepped `/v1/auth` passkey flow, `/v1/reauth` write-unlock semantics, current builtin ACP set `dl14`) |
-| v1.0.0 | ≥ 1.11.x | ⚠️ Unverified — newer Kanidm may change routes or ACP data; use *at your own risk* until a Shenasa release states support |
+| **v1.1.0** | **1.10.x** (recommended **1.10.5**) | ✅ Supported — every endpoint, auth flow, builtin ACP and error path the UI touches is source-verified against the Kanidm **v1.10.5** tree (file/line evidence in `docs/security-audit-1.0.0.md` and the CHANGELOG) |
+| **v1.1.0** | **1.11.x** (verified **1.11.0**) | ✅ Supported — the `/v1` route sets of 1.10.5 and 1.11.0 are **identical** (100/100 routes); dl15 builtin ACPs are additive-only vs dl14 (self-read attribute widening, OAuth2 introspection attributes) so the role/tier mapping is unchanged; auth scope semantics, the 600 s write window and the 7-day recycle retention are the same constants |
+| v1.1.0 | ≤ 1.9.x | ❌ Unsupported — earlier servers lack parts of the 1.10 REST/auth surface this UI relies on (stepped `/v1/auth` passkey flow, `/v1/reauth` write-unlock semantics) |
+| v1.1.0 | ≥ 1.12.x | ⚠️ Unverified — dev series; use *at your own risk* until a Shenasa release states support |
 
 Notes:
 
+- The UI **auto-detects the server version** from the
+  `X-KANIDM-VERSION` response header (present in both 1.10 and 1.11) and
+  shows a live *supported / not supported / not detected* badge in
+  **Settings** — you never have to guess what you are talking to.
 - Kanidm Docker tags have **no `v` prefix** (`kanidm/server:1.10.5`, not
   `:v1.10.5`), and `:latest` tracks the **dev** branch — always pin an
   exact version.
@@ -55,8 +64,9 @@ Notes:
   (GET /ui/logout), so SSO cannot silently re-log you in.
 - **Dashboard**: live stat cards (users, groups, active accounts,
   passkey-only accounts), SVG charts (status pie, members-per-group bars,
-  passkey-adoption ring), your roles, and a pointer to the server's own
-  audit log (Kanidm does not expose audit events over REST).
+  passkey-adoption ring), the server **domain card** (`GET /v1/domain`),
+  your roles, and a pointer to the server's own audit log (Kanidm does not
+  expose audit events over REST).
 - **Users**: search, group filter, pagination; create/edit/soft-delete;
   valid-from/expiry; PII gating; CSV import + CSV/JSON export.
 - **User detail**: edit fields (username read-only), group chips
@@ -69,6 +79,16 @@ Notes:
   the server's builtin ACPs, custom groups from their description
   attribute, editable in the group dialog). Permission denials explain
   Kanidm's tiered rules (see below).
+- **Apps (OAuth2/OIDC clients)** (`idm_oauth2_admins`): manage your SSO
+  applications end-to-end — public (PKCE) vs basic (confidential) clients,
+  landing/redirect URIs with strict matching, per-group **scope maps**,
+  **supplementary scope maps** and **claim maps**, one-time basic-secret
+  reveal. Real `/v1/oauth2*` endpoints with the same payloads the
+  bootstrap scripts use (verified against v1.10.5 and v1.11.0).
+- **Service accounts** (`idm_service_account_admins`): create/delete
+  service accounts, and full **API-token lifecycle** — list (with
+  read-only/read-write badges), issue with optional expiry/compact, the
+  full token shown exactly once with QR hand-off, revoke by id.
 - **Recycle bin**: list soft-deleted entries and revive them (real
   `/v1/recycle_bin` endpoints; requires `idm_recycle_bin_admins`). Entries
   are retained for 7 days (Kanidm server constant), then purged by the
@@ -106,7 +126,7 @@ Verified against the Kanidm 1.10 builtin access-control profiles
   (builtin ACP `idm_acp_group_entry_manager`).
 - **System-level groups** (`idm_high_privilege`,
   `idm_access_control_admins`, `idm_schema_admins`,
-  `idm_recycle_bin_admins`, `idm_oauth2_client_admins`, …) are managed by
+  `idm_recycle_bin_admins`, `idm_oauth2_admins`, …) are managed by
   **`idm_access_control_admins` / system admins** — not by `idm_admins`.
 - The **recycle bin** requires its own role: **`idm_recycle_bin_admins`**.
 - **Security**: strict CSP, hardened headers (HSTS, nosniff, frame deny,
@@ -177,10 +197,10 @@ PKCE client — there is no secret):
 
 | key | default | notes |
 | --- | --- | --- |
-| `apiUrl` | `https://idm.avvalman.ir/v1` | Kanidm REST base, **ends in `/v1`** |
+| `apiUrl` | `https://idm.example.com/v1` | Kanidm REST base, **ends in `/v1`** |
 | `oidcClientId` | `shenasa_admin_ui` | public OAuth2 client |
 | `oidcScope` | `openid profile email` | |
-| `oidcRedirectUri` | `https://idm.avvalman.ir/oauth2/redirect` | must be registered on the client |
+| `oidcRedirectUri` | `https://idm.example.com/oauth2/redirect` | must be registered on the client |
 | `theme` | `light` | `light`/`dark`/`auto` |
 
 Overrides (precedence: URL query > localStorage (Settings page) > defaults):
@@ -246,6 +266,7 @@ js/  config.js i18n.js store.js api.js validation.js ui.js auth.js
 docs/  openapi.yaml          endpoints the client uses
        USER-GUIDE.md         full usage guide + RBAC/tiering best practice
        RELEASING.md          maintainer release/publishing procedure
+       ROADMAP.md            public development roadmap
        security-audit-1.0.0.md   pre-1.0 audit evidence
 deploy/               docker-compose, Caddyfile, nginx examples, scripts
 scripts/  check-syntax.js, serve.js
@@ -263,6 +284,7 @@ test/     smoke.test.js (jsdom), integration.sh (real Kanidm)
   pre-1.0 security audit evidence.
 - **[docs/RELEASING.md](docs/RELEASING.md)** — maintainer release
   procedure (GitHub publish checklist).
+- **[docs/ROADMAP.md](docs/ROADMAP.md)** — public development roadmap.
 - **[GO-LIVE-checklist.md](GO-LIVE-checklist.md)** — production go-live
   checklist.
 

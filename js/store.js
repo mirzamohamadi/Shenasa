@@ -63,6 +63,9 @@
           // Server-side write scope is NOT persisted across a page reload:
           // it is refreshed from /v1/self/_uat after sign-in/restore.
           Store.writeExpiry = 0;
+          // Same for the detected server version: re-read from the next
+          // response's X-KANIDM-VERSION header.
+          Store.serverVersion = null;
           return Store.user;
         }
       } catch (e) {}
@@ -98,6 +101,44 @@
       }
       return 0; // "readonly" or unknown
     },
+
+    // ---- server version / compatibility -------------------------------
+    // Detected from the X-KANIDM-VERSION response header, which the
+    // server's global version middleware injects into EVERY response in
+    // both 1.10 and 1.11 (server/core/src/https/middleware/mod.rs).
+    // Memory-only: re-detected from the first API call after each load.
+    // Absent (stripped by a proxy / mid-deploy / not exposed over CORS)
+    // must degrade to 'unknown', never to an error.
+    serverVersion: null,
+    setServerVersion: function (v) {
+      if (typeof v !== 'string') return;
+      v = v.trim();
+      if (!/^[\w.+-]{1,32}$/.test(v)) return; // header garbage guard
+      Store.serverVersion = v;
+    },
+    serverVersionParsed: function () {
+      var m = Store.serverVersion &&
+        /^(\d+)\.(\d+)\.(\d+)/.exec(Store.serverVersion);
+      return m ? { major: +m[1], minor: +m[2], patch: +m[3] } : null;
+    },
+    // Compatibility contract (evidence in README "Compatibility"):
+    //   - /v1 route sets of 1.10.5 and 1.11.0 are IDENTICAL (verified diff
+    //     of server/core/src/https/v1.rs).
+    //   - dl15 builtin ACPs are additive-only vs dl14 (self-read attr
+    //     widening, OAuth2 introspection attrs) — role mapping unchanged.
+    //   - Auth scope semantics + privilege/session + recycle constants
+    //     unchanged (process_uat_to_identity, constants/mod.rs).
+    SUPPORTED_KANIDM: [[1, 10], [1, 11]],
+    serverCompat: function () {
+      var v = Store.serverVersionParsed();
+      if (!v) return 'unknown';
+      for (var i = 0; i < Store.SUPPORTED_KANIDM.length; i++) {
+        if (v.major === Store.SUPPORTED_KANIDM[i][0] &&
+            v.minor === Store.SUPPORTED_KANIDM[i][1]) return 'supported';
+      }
+      return 'unsupported';
+    },
+    SUPPORTED_KANIDM_LABEL: '1.10.x / 1.11.x',
 
     // ---- role mapping -------------------------------------------------
     // Map group claims (SPNs) to bare role names: "idm_admins@domain" ->
@@ -160,6 +201,17 @@
     // idm_people_admins can see it (idm_acp_recycle_bin_search/_revive).
     canRecycleBin: function () {
       return Store.hasAnyRole(['idm_recycle_bin_admins']);
+    },
+    // OAuth2/OIDC clients: managed by idm_oauth2_admins (builtin ACPs
+    // idm_acp_oauth2_manage{,_basic} — receiver UUID_IDM_OAUTH2_ADMINS in
+    // dl14/dl15 access.rs). NOT idm_admins.
+    canManageOauth2: function () {
+      return Store.hasAnyRole(['idm_oauth2_admins']);
+    },
+    // Service accounts + their API tokens: idm_service_account_admins
+    // (builtin ACPs idm_acp_service_account_{create,manage,delete}).
+    canManageServiceAccounts: function () {
+      return Store.hasAnyRole(['idm_service_account_admins']);
     }
   };
 

@@ -120,7 +120,81 @@
       };
       if (!opts.skipUsername) rules.name = username;
       return run(data, rules);
+    },
+
+    // Absolute https URL — Kanidm requires https redirect/landing URLs for
+    // OAuth2 clients (http is only ever allowed for localhost dev clients
+    // with an explicit opt-in attribute, which Shenasa does not expose).
+    httpsUrl: function (v, label) {
+      label = label || 'URL';
+      if (typeof v !== 'string' || v.trim() === '') return res(false, label + ' is required.');
+      // Regex-only (no URL constructor dependency in tests/workers); the
+      // SERVER re-validates authoritatively — this just catches typos.
+      if (!/^https:\/\/[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?(\/[^\s]*)?$/.test(v.trim())) {
+        return res(false, label + ' must be a valid absolute https:// URL (e.g. https://app.example.com/callback) — plain http is not accepted by Kanidm here.');
+      }
+      return res(true);
+    },
+
+    // Whitespace/comma separated OIDC-ish tokens (scopes / claim values).
+    tokenList: function (v, label) {
+      label = label || 'Value list';
+      if (typeof v !== 'string' || v.trim() === '') return res(false, label + ' is required.');
+      var parts = v.trim().split(/[\s,]+/);
+      for (var i = 0; i < parts.length; i++) {
+        if (!/^[a-zA-Z0-9_.:*-]{1,64}$/.test(parts[i])) {
+          return res(false, label + ': "' + parts[i] + '" is not a valid token (letters, digits, _ . : * -).');
+        }
+      }
+      return res(true);
+    },
+
+    // OAuth2 client create/edit form. Landing URL required (Kanidm builds
+    // the origin list from it); managed-by optional group name.
+    oauthClientForm: function (data, opts) {
+      opts = opts || {};
+      var rules = {
+        displayname: displayName,
+        originLanding: function (v) { return Validation.httpsUrl(v, 'Landing URL'); }
+      };
+      if (!opts.skipName) rules.name = username;
+      return run(data, rules);
+    },
+
+    // Service account create form — the server REQUIRES entry_managed_by.
+    serviceAccountForm: function (data, opts) {
+      opts = opts || {};
+      var rules = {
+        displayname: displayName,
+        entryManagedBy: function (v) {
+          if (typeof v !== 'string' || v.trim() === '') {
+            return res(false, 'Managed-by group is required — Kanidm rejects service accounts without one.');
+          }
+          var r = username(v.trim());
+          return r.ok ? res(true) : res(false, 'Managed-by must be a valid group name.');
+        }
+      };
+      if (!opts.skipName) rules.name = username;
+      return run(data, rules);
+    },
+
+    // API token issue form: label required; expiry optional ISO date/datetime.
+    apiTokenForm: function (data) {
+      var rules = {
+        label: function (v) {
+          if (typeof v !== 'string' || v.trim() === '') return res(false, 'Label is required (e.g. "ci-deploy").');
+          if (v.length > 64) return res(false, 'Label must be at most 64 characters.');
+          return res(true);
+        },
+        expiry: function (v) { return isoDate(v, 'Expiry'); }
+      };
+      return run(data, rules);
     }
+  };
+
+  // Small standalone helpers (also used by list pages).
+  Validation.parseTokenList = function (v) {
+    return String(v == null ? '' : v).trim().split(/[\s,]+/).filter(Boolean);
   };
 
   global.Validation = Validation;

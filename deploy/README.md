@@ -137,7 +137,7 @@ docker logs shenasa-kanidm --since 1h | grep -i <operation-id-or-user>
   (they are `entry_managed_by: idm_admins`).
 - system-level groups (`idm_high_privilege`, `idm_access_control_admins`,
   `idm_schema_admins`, `idm_recycle_bin_admins`,
-  `idm_oauth2_client_admins`) → only `idm_access_control_admins` /
+  `idm_oauth2_admins`) → only `idm_access_control_admins` /
   system admins (e.g. recovered via `kanidmd recover-account admin`).
 - recycle bin (list + revive) → `idm_recycle_bin_admins`.
 
@@ -186,6 +186,58 @@ of v1.10.5): `thread_count`, `db_fs_type`, `trust_x_forward_for`,
 `log_level`; all are also settable via `KANIDM_*` environment variables.
 Do NOT touch `db_arc_size` (internal cache sizing, upstream warns against
 changing it).
+
+## Running Kanidm 1.11 (default pin) — and staying on 1.10
+
+Shenasa is verified compatible with **both** Kanidm 1.10.x and 1.11.x (the
+two releases expose identical `/v1` route sets; their builtin ACP and auth
+constants match — evidence in the README compatibility table). The deploy
+layer pins `kanidm/server:1.11.0` by default; to stay on the battle-tested
+1.10 line, pin `kanidm/server:1.10.5` instead (Docker Hub tags have no `v`
+prefix). Kanidm upgrades are **one-way**: the first boot of a newer version
+migrates the database and **downgrades are not supported upstream**.
+
+Upgrading an existing 1.10 deployment to 1.11:
+
+1. Read the [1.11.0 release notes](https://github.com/kanidm/kanidm/releases/tag/v1.11.0)
+   and the upstream upgrade documentation.
+2. **Back up the database volume** — at minimum stop the stack and copy
+   the volume first. All compose commands run from `deploy/` (the compose
+   file lives there, not in the project root), and the data volume is
+   named `<compose-dir>_kanidm_data` — with these scripts that is
+   **`deploy_kanidm_data`** (confirm with `docker volume ls`):
+
+   ```sh
+   cd deploy && docker compose stop kanidm
+   docker run --rm -v deploy_kanidm_data:/data -v "$HOME":/backup alpine \
+     tar czf /backup/kanidm-data-pre-1.11.tgz -C /data .
+   tar tzf "$HOME"/kanidm-data-pre-1.11.tgz | head   # must list kanidm.db…
+   cd deploy && docker compose start kanidm
+   ```
+
+   ⚠️ Point `-v` at the volume that actually exists: Docker silently
+   **creates an empty volume** for a misspelled name and you would back up
+   nothing (a ~100-byte tar is an empty archive — always `tar tzf` it).
+3. Edit `deploy/docker-compose.yml`: `kanidm/server:1.10.5` →
+   `kanidm/server:1.11.0` (Docker Hub tags have no `v` prefix).
+4. From `deploy/`: `docker compose pull kanidm && docker compose up -d`
+   and watch `docker compose logs -f kanidm` until the migration
+   completes.
+5. Verify: **Settings** in Shenasa shows the detected server version with
+   a green *supported* badge (read from the `X-KANIDM-VERSION` header), or
+   `curl -sI https://<your-domain>/ | grep -i x-kanidm-version`.
+
+Shenasa needs **no config change** for 1.11 — the UI talks to the same
+endpoints and detects the version automatically.
+
+⚠️ **Re-running `setup.sh` after re-unzipping a release zip** resets
+`deploy/docker-compose.yml` to the zip's default pin. If your server has
+already been upgraded beyond that tag, `setup.sh` **aborts** with a clear
+`refusing to DOWNGRADE` error instead of crash-looping Kanidm against a
+newer database (`MG0010DowngradeNotAllowed`). Fix: re-pin the compose file
+to the tag your deployment last ran, then re-run. The same guard also
+diagnoses the situation from the container logs if the readiness wait
+times out.
 
 ## Files
 

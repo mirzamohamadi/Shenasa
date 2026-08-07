@@ -11,10 +11,11 @@
  *   - other non-2xx  -> ApiError(status, json.message || statusText)
  *   - network error  -> ApiError(0, ...)
  *
- * Only endpoints that exist in Kanidm 1.10 are called (verified against the
- * upstream source): features with NO REST surface — audit log reading,
- * invitations, listing/revoking other sessions, SCIM import — are not
- * exposed in this client at all.
+ * Only endpoints that exist in Kanidm 1.10/1.11 are called (the /v1 route
+ * sets of v1.10.5 and v1.11.0 are identical — verified by diffing
+ * server/core/src/https/v1.rs): features with NO REST surface — audit log
+ * reading, invitations, listing/revoking other sessions, SCIM import —
+ * are not exposed in this client at all.
  */
 (function (global) {
   'use strict';
@@ -61,6 +62,17 @@
         throw new ApiError(0, 'Network error contacting ' + this._url(path) +
           ': ' + (e && e.message ? e.message : e), '0');
       }
+      // X-KANIDM-VERSION is injected into every response by the server's
+      // global version middleware (1.10 and 1.11) — feed it to the Store
+      // so Settings can show live compatibility. Absent/stripped headers
+      // degrade to 'unknown' (see Store.serverCompat); never fatal.
+      try {
+        var kv = res.headers && typeof res.headers.get === 'function' ?
+          res.headers.get('x-kanidm-version') : null;
+        if (kv && global.Store && global.Store.setServerVersion) {
+          global.Store.setServerVersion(kv);
+        }
+      } catch (e) { /* header not readable (CORS expose) — fine */ }
       if (res.status === 401) throw new ApiError(401, 'session expired', '401');
       if (res.status === 204) return null;
       var text = '';
@@ -276,7 +288,111 @@
     listRecycled: function () { return Api._request('GET', '/recycle_bin'); },
     reviveRecycled: function (uuid) {
       return Api._request('POST', '/recycle_bin/' + enc(uuid) + '/_revive');
-    }
+    },
+
+    // ---- OAuth2 / OIDC clients -----------------------------------------
+    // Route/method table verified against server/core/src/https/v1.rs and
+    // the payload shapes against libs/client/src/oauth.rs — identical in
+    // v1.10.5 and v1.11.0. Role gate: idm_oauth2_admins
+    // (idm_acp_oauth2_manage{,_basic}).
+    listOauth2Clients: function () { return Api._request('GET', '/oauth2'); },
+    getOauth2Client: function (name) { return Api._request('GET', '/oauth2/' + enc(name)); },
+    // Create entries use the Entry {"attrs":{...}} envelope, exactly like
+    // deploy/bootstrap.sh (which is field-verified against real servers).
+    createOauth2PublicClient: function (data) {
+      var attrs = {
+        name: data.name,
+        displayname: data.displayname,
+        oauth2_rs_origin_landing: data.originLanding,
+        oauth2_strict_redirect_uri: 'true'
+      };
+      return Api._request('POST', '/oauth2/_public', Api._entry(attrs));
+    },
+    createOauth2BasicClient: function (data) {
+      var attrs = {
+        name: data.name,
+        displayname: data.displayname,
+        oauth2_rs_origin_landing: data.originLanding,
+        oauth2_strict_redirect_uri: 'true'
+      };
+      return Api._request('POST', '/oauth2/_basic', Api._entry(attrs));
+    },
+    // PATCH replaces ONLY the listed attribute values (attrs envelope);
+    // unlisted attributes are preserved (bootstrap.sh relies on this).
+    updateOauth2Client: function (name, attrs) {
+      return Api._request('PATCH', '/oauth2/' + enc(name), Api._entry(attrs));
+    },
+    deleteOauth2Client: function (name) { return Api._request('DELETE', '/oauth2/' + enc(name)); },
+    // GET returns the CURRENT basic secret as a plain string (only basic /
+    // confidential clients have one; public clients 404/403).
+    getOauth2BasicSecret: function (name) {
+      return Api._request('GET', '/oauth2/' + enc(name) + '/_basic_secret');
+    },
+    // Scope maps: POST body is a bare JSON array of scope strings; DELETE
+    // has no body. The server resolves the group segment by name or SPN
+    // (bootstrap.sh passes bare group names on production servers).
+    setOauth2ScopeMap: function (name, group, scopes) {
+      return Api._request('POST', '/oauth2/' + enc(name) + '/_scopemap/' + enc(group), scopes);
+    },
+    deleteOauth2ScopeMap: function (name, group) {
+      return Api._request('DELETE', '/oauth2/' + enc(name) + '/_scopemap/' + enc(group));
+    },
+    setOauth2SupScopeMap: function (name, group, scopes) {
+      return Api._request('POST', '/oauth2/' + enc(name) + '/_sup_scopemap/' + enc(group), scopes);
+    },
+    deleteOauth2SupScopeMap: function (name, group) {
+      return Api._request('DELETE', '/oauth2/' + enc(name) + '/_sup_scopemap/' + enc(group));
+    },
+    setOauth2ClaimMap: function (name, claim, group, values) {
+      return Api._request('POST', '/oauth2/' + enc(name) + '/_claimmap/' + enc(claim) + '/' + enc(group), values);
+    },
+    deleteOauth2ClaimMap: function (name, claim, group) {
+      return Api._request('DELETE', '/oauth2/' + enc(name) + '/_claimmap/' + enc(claim) + '/' + enc(group));
+    },
+
+    // ---- Service accounts ----------------------------------------------
+    // Verified against server/core/src/https/v1.rs and
+    // libs/client/src/service_account.rs (identical 1.10.5 / 1.11.0).
+    // Role gate: idm_service_account_admins.
+    listServiceAccounts: function () { return Api._request('GET', '/service_account'); },
+    getServiceAccount: function (id) { return Api._request('GET', '/service_account/' + enc(id)); },
+    // entry_managed_by is REQUIRED by the server for service-account
+    // creation and must be a group that manages the lifecycle of the
+    // account (libs/client idm_service_account_create sends it always).
+    createServiceAccount: function (data) {
+      var attrs = {
+        name: data.name,
+        displayname: data.displayname,
+        entry_managed_by: data.entryManagedBy
+      };
+      return Api._request('POST', '/service_account', Api._entry(attrs));
+    },
+    updateServiceAccount: function (id, attrs) {
+      return Api._request('PATCH', '/service_account/' + enc(id), Api._entry(attrs));
+    },
+    deleteServiceAccount: function (id) { return Api._request('DELETE', '/service_account/' + enc(id)); },
+    // GET lists ApiToken { token_id, label, expiry(optional epoch secs),
+    // issued_at(epoch secs), purpose } — proto/src/internal/token.rs.
+    listApiTokens: function (id) {
+      return Api._request('GET', '/service_account/' + enc(id) + '/_api_token');
+    },
+    // POST body ApiTokenGenerate { label, expiry: nulable epoch secs,
+    // read_write, compact } — the full token string is returned ONCE in
+    // the response and can never be read again afterwards.
+    generateApiToken: function (id, data) {
+      return Api._request('POST', '/service_account/' + enc(id) + '/_api_token', {
+        label: data.label,
+        expiry: data.expiry || null,
+        read_write: !!data.readWrite,
+        compact: !!data.compact
+      });
+    },
+    deleteApiToken: function (id, tokenId) {
+      return Api._request('DELETE', '/service_account/' + enc(id) + '/_api_token/' + enc(tokenId));
+    },
+
+    // ---- Domain ---------------------------------------------------------
+    getDomain: function () { return Api._request('GET', '/domain'); }
   };
 
   global.Api = Api;

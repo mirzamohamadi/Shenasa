@@ -4,9 +4,86 @@ All notable changes to Shenasa are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.1.0] - 2026-08-06
 
-(No changes yet.)
+**First public release.** v1.0.0 was the internal baseline milestone (never
+tagged publicly); the first public tag is `v1.1.0`, containing the whole
+v1.0.0 baseline below plus everything in this section.
+
+### Added
+
+- **Apps page — full OAuth2/OIDC client management** (`#/apps`, gated on
+  `idm_oauth2_admins`; every route + payload verified against
+  `server/core/src/https/v1.rs` and `libs/client/src/oauth.rs`, identical
+  in v1.10.5 and v1.11.0): client list with public/basic badges, create
+  **public (PKCE)** or **basic (confidential)** clients
+  (`POST /v1/oauth2/{_public,_basic}` using the same `{"attrs":{…}}`
+  envelope `deploy/bootstrap.sh` is field-verified against, strict
+  redirect matching on by default), edit displayname/landing/strict
+  (`PATCH`), delete, **redirect-origins** add/remove, **scope maps**,
+  **supplementary scope maps** and **claim maps** add/update/remove via the
+  dedicated `_{,sup_,}scopemap/{group}` and `_claimmap/{claim}/{group}`
+  endpoints (bare-JSON-array bodies, group segments resolved
+  server-side), and a one-time **reveal basic secret** for confidential
+  clients. Serialized map rows are parsed tolerantly (JSON form, or the
+  legacy `group: [scopes]` / `claim: group: [values]` text forms); rows
+  whose server-side shape was not recognised render display-only instead
+  of guessing arguments at the server. Public clients deliberately have
+  NO secret control.
+- **Service accounts page** (`#/svcaccounts`, gated on
+  `idm_service_account_admins`; verified against
+  `libs/client/src/service_account.rs` and
+  `proto/src/{v1/mod.rs,internal/token.rs}`, identical across both
+  releases): list/create/delete service accounts — the form enforces the
+  server-required `entry_managed_by` group — plus the full **API token
+  lifecycle**: list (`GET /v1/service_account/{id}/_api_token` →
+  `{token_id,label,expiry,issued_at,purpose}` — read-only/read-write
+  badges, expiry rendered or "never"), **issue**
+  (`ApiTokenGenerate{label, expiry: nullable epoch seconds, read_write,
+  compact}`) with the full token shown **exactly once** — copy button and
+  QR hand-off, never persisted — and **revoke** by token id.
+- **Domain stat card on the dashboard** (`GET /v1/domain`; tolerant —
+  roles without domain-read simply skip the card).
+- **Role-accurate 403 guidance for the new areas**: denials on Apps now
+  name `idm_oauth2_admins`, on service accounts `idm_service_account_admins`
+  (the read-only-session step-up hint still takes precedence when
+  applicable).
+
+### Changed
+
+- **Publish hygiene**: shipped defaults in `js/config.js` (and the matching
+  rewrite patterns in `deploy/setup.sh`) now use the neutral
+  `https://idm.example.com` placeholders instead of a real deployment
+  domain; SECURITY.md routes reports through GitHub private vulnerability
+  reporting instead of a personal mailbox. A regression test now scans the
+  shipped sources for private domains on every run.
+- **Default deploy pin flipped to `kanidm/server:1.11.0`** (1.10.5 remains
+  the verified alternative — both releases expose identical `/v1` route
+  sets). A re-unzipped release zip can therefore never roll an upgraded
+  host back *by default*; combined with the new guard below, accidental
+  downgrades are now structurally prevented instead of just documented.
+
+### Added (deploy hardening)
+
+- **`setup.sh` downgrade guard**: before starting containers, setup
+  compares the compose pin against the image this host actually runs
+  (`docker inspect shenasa-kanidm`) and **aborts** with precise re-pin
+  instructions when the pin is older — Kanidm migrations are one-way and
+  an older server crash-loops with `MG0010DowngradeNotAllowed`. The 120 s
+  readiness wait additionally scans the container logs for that exact
+  refusal and prints the remediation instead of a generic timeout.
+  Forward upgrades print a notice with a 5 s Ctrl+C window (backup
+  reminder). Regression-proofed by tests that pin the guard strings and
+  require the compose default to sit on a Shenasa-supported release line.
+
+### Fixed
+
+- **Wrong builtin role name in docs and UI copy**: the OAuth2-admin
+  builtin group is `idm_oauth2_admins`, not the (nonexistent)
+  `idm_oauth2_client_admins` — verified against the dl14/dl15
+  `access.rs` receivers (`UUID_IDM_OAUTH2_ADMINS`) and live whoami data.
+  Corrected in README, USER-GUIDE, ROADMAP, deploy/README and the group
+  capability annotations.
 
 ## [1.0.0] - 2026-08-06
 
@@ -14,7 +91,7 @@ First stable public release. Shipped after a full security audit of every
 code path (see `docs/security-audit-1.0.0.md`): XSS-sink review, OIDC
 claim binding, CSRF/clickjacking posture, CSV injection, dependency audit
 (`npm audit`: 0 vulnerabilities), secret scan, and hardened deployment
-files. 38/38 self-tests pass.
+files. 40/40 self-tests pass.
 
 **Compatibility: Kanidm server 1.10.x** (source-verified against v1.10.5;
 the deploy layer pins `kanidm/server:1.10.5`). See the Compatibility
@@ -64,6 +141,24 @@ section in the README and `docs/USER-GUIDE.md`.
 
 ### Added
 
+- **Kanidm 1.11 verified support + live server-version detection.** The
+  full `/v1` route sets of v1.10.5 and v1.11.0 were diffed and are
+  **identical** (100/100 routes), the dl15 builtin ACPs are additive-only
+  over dl14 (self-read attribute widening, OAuth2 introspection
+  attributes), and the auth scope semantics/privilege-expiry/recycle-bin
+  constants are unchanged — so Shenasa now officially supports **both
+  1.10.x and 1.11.x** (matrix in the README). The client also reads the
+  `X-KANIDM-VERSION` response header (global middleware in both releases)
+  on every call and shows the detected server version with a
+  supported / NOT supported / not detected badge on the Settings page;
+  unknown/absent headers degrade gracefully, and garbage header values are
+  rejected (regression tests cover the 1.9/1.10/1.11/1.12/dev boundaries).
+- **Public roadmap** (`docs/ROADMAP.md`): v1.1 "applications & service
+  accounts" builds on the verified-but-unused 1.10/1.11 REST surface
+  (`/v1/oauth2`, `/v1/service_account` incl. API-token issue/revoke),
+  v1.2 scale/governance operations, v1.3 lifecycle depth, v2.0 gated on a
+  stable upstream 1.12; features with no server API (audit reading,
+  revoking other sessions, manual recycle purge) stay tracked-and-blocked.
 - **Step-up authentication (write unlock).** Interactive logins (Kanidm web
   login and Shenasa's stepped passkey flow, both with `privileged: false`)
   mint a *privilege-capable* session whose UAT maps to
@@ -300,5 +395,6 @@ Initial development snapshot (pre-public; never tagged).
 - Documentation: README, deploy two-phase guide, SECURITY, CONTRIBUTING,
   OpenAPI reference, go-live checklist, MIT license.
 
-[Unreleased]: https://github.com/mirzamohamadi/shenasa/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/mirzamohamadi/shenasa/releases/tag/v1.0.0
+[Unreleased]: https://github.com/mirzamohamadi/shenasa/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/mirzamohamadi/shenasa/releases/tag/v1.1.0
+[1.0.0]: https://github.com/mirzamohamadi/shenasa/blob/main/CHANGELOG.md#100---2026-08-06

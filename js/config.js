@@ -19,7 +19,7 @@
 
   var DEFAULTS = {
     // Base URL of the Kanidm REST API. MUST end in /v1.
-    apiUrl: 'https://idm.avvalman.ir/v1',
+    apiUrl: 'https://idm.example.com/v1',
     // Public OIDC client (Authorization Code + PKCE, no secret).
     oidcClientId: 'shenasa_admin_ui',
     /* Request Kanidm's built-in "groups" scope too: group SPNs in the
@@ -29,7 +29,7 @@
     // For single-origin deployments use the Shenasa origin, e.g.
     // https://idm.example.com/admin/ (or the value Kanidm expects, such as
     // https://idm.example.com/oauth2/redirect when proxied behind Kanidm).
-    oidcRedirectUri: 'https://idm.avvalman.ir/oauth2/redirect',
+    oidcRedirectUri: 'https://idm.example.com/oauth2/redirect',
     // 'light' | 'dark' | 'auto'
     theme: 'light',
     // Minutes of inactivity before an automatic sign-out. 0 = disabled

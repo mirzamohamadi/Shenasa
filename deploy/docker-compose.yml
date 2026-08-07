@@ -10,15 +10,25 @@
 # Quick start:  bash deploy/setup.sh idm.example.com
 services:
   kanidm:
-    # Pinned to the exact Kanidm release Shenasa is verified against
-    # (every endpoint contract in this repo was checked against the
-    # v1.10.5 source). NOTE: Docker Hub tags have NO "v" prefix
-    # (kanidm/server:1.10.5 exists; :v1.10.5 does not) — "v" is only the
-    # upstream git tag format. Upgrade DELIBERATELY after reading upstream
-    # release notes — tracking :latest silently changes your identity
-    # server's behaviour and audit surface on every pull (:latest currently
-    # tracks the 1.12.0-dev builds, not a stable release).
-    image: kanidm/server:1.10.5
+    # Pinned to the exact Kanidm release Shenasa is verified against.
+    # Verified-compatible server tags: 1.11.0 (default) and 1.10.5 — the
+    # /v1 route sets of the two releases are IDENTICAL and their builtin
+    # ACP/auth constants are unchanged (verified by diffing both source
+    # trees; see README "Compatibility"). To stay on 1.10, pin
+    # kanidm/server:1.10.5 instead.
+    # ⚠️  Never pin a tag OLDER than the version this host has already
+    # run: Kanidm migrations are ONE-WAY and an older server refuses a
+    # newer database (MG0010DowngradeNotAllowed, crash-loop). A re-unzipped
+    # release zip resets this pin to the release default — deploy/setup.sh
+    # detects exactly that and ABORTS instead of downgrading you. Restore
+    # the tag your deployment last ran, then re-run.
+    # NOTE: Docker Hub tags have NO "v" prefix (kanidm/server:1.11.0
+    # exists; :v1.11.0 does not) — "v" is only the upstream git tag format.
+    # Upgrade DELIBERATELY after reading upstream release notes — tracking
+    # :latest silently changes your identity server's behaviour and audit
+    # surface on every pull (:latest currently tracks the 1.12.0-dev
+    # builds, not a stable release).
+    image: kanidm/server:1.11.0
     container_name: shenasa-kanidm
     restart: unless-stopped
     environment:

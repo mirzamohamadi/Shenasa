@@ -217,8 +217,8 @@ else
   CFG_REDIRECT="https://$UI_DOMAIN/"
 fi
 sed -i.bak \
-  -e "s#apiUrl: 'https://idm.avvalman.ir/v1'#apiUrl: '$CFG_API'#" \
-  -e "s#oidcRedirectUri: 'https://idm.avvalman.ir/oauth2/redirect'#oidcRedirectUri: '$CFG_REDIRECT'#" \
+  -e "s#apiUrl: 'https://idm.example.com/v1'#apiUrl: '$CFG_API'#" \
+  -e "s#oidcRedirectUri: 'https://idm.example.com/oauth2/redirect'#oidcRedirectUri: '$CFG_REDIRECT'#" \
   "$SCRIPT_DIR/ui/js/config.js"
 rm -f "$SCRIPT_DIR/ui/js/config.js.bak"
 
@@ -230,6 +230,36 @@ else
   COMPOSE=(docker-compose -f "$SCRIPT_DIR/docker-compose.yml")
 fi
 WAS_RUNNING=$("${COMPOSE[@]}" ps -q 2>/dev/null | wc -l)
+
+# --- Downgrade guard -----------------------------------------------------------
+# Kanidm migrations are ONE-WAY: a database migrated by version N is refused
+# by every older server (MG0010DowngradeNotAllowed) which then crash-loops and
+# leaves the readiness wait below hanging. A re-unzipped release zip silently
+# resets the pinned image to the release default, which may be older than the
+# tag this host already runs — refuse BEFORE recreating any container.
+PINNED_TAG=$(sed -n 's/^[[:space:]]*image:[[:space:]]*kanidm\/server://p' \
+  "$SCRIPT_DIR/docker-compose.yml" | head -n1 | tr -d "\"'[:space:]")
+DEPLOYED_TAG=$(docker inspect -f '{{.Config.Image}}' shenasa-kanidm 2>/dev/null \
+  | sed -n 's#.*kanidm/server:##p' | head -n1 || true)
+if [ -n "$PINNED_TAG" ] && [ -n "$DEPLOYED_TAG" ] && [ "$PINNED_TAG" != "$DEPLOYED_TAG" ]; then
+  case "$PINNED_TAG.$DEPLOYED_TAG" in
+    *[!0-9.]*)
+      log "WARNING: non-semver image tag (pinned='$PINNED_TAG' deployed='$DEPLOYED_TAG') — cannot verify downgrade safety." ;;
+    *)
+      if [ "$PINNED_TAG" = "$(printf '%s\n%s\n' "$PINNED_TAG" "$DEPLOYED_TAG" | sort -V | head -n1)" ]; then
+        printf '[setup] ERROR: refusing to DOWNGRADE Kanidm: deployed %s > pinned %s.\n' "$DEPLOYED_TAG" "$PINNED_TAG" >&2
+        printf '        This host already ran kanidm/server:%s; its database migration is ONE-WAY and an\n' "$DEPLOYED_TAG" >&2
+        printf '        older server would fail with MG0010DowngradeNotAllowed.\n' >&2
+        printf '        Fix: re-pin deploy/docker-compose.yml to kanidm/server:%s, then re-run setup.sh.\n' "$DEPLOYED_TAG" >&2
+        printf '        Policy: https://kanidm.github.io/kanidm/stable/support.html#upgrade-policy\n' >&2
+        exit 1
+      fi
+      log "NOTICE: pinned $PINNED_TAG > deployed $DEPLOYED_TAG — this run will UPGRADE Kanidm (one-way DB migration)."
+      log "        Ctrl+C within 5s to abort and back up first (see deploy/README.md)…"
+      sleep 5 ;;
+  esac
+fi
+
 "${COMPOSE[@]}" up -d
 # Re-running setup must pick up re-rendered Caddyfile/server.toml (bind mounts).
 if [ "$WAS_RUNNING" -gt 0 ]; then
@@ -247,7 +277,18 @@ until curl -fsS "${CURL_CA[@]}" --resolve "$DOMAIN:8443:127.0.0.1" -o /dev/null 
   TRIES=$((TRIES + 1))
   sleep 2
 done
-[ $TRIES -lt 60 ] || die "Kanidm did not become ready in 120s — check: ${COMPOSE[*]} logs kanidm caddy"
+if [ $TRIES -ge 60 ]; then
+  if "${COMPOSE[@]}" logs --tail=300 kanidm 2>/dev/null | grep -q 'MG0010DowngradeNotAllowed'; then
+    printf '[setup] ERROR: Kanidm refused to start: MG0010DowngradeNotAllowed (one-way migration).\n' >&2
+    printf '        The database was already migrated by a NEWER Kanidm than the pinned image (%s).\n' "$PINNED_TAG" >&2
+    printf '        A re-unzip may have reset deploy/docker-compose.yml to an older default pin.\n' >&2
+    printf '        Fix: re-pin deploy/docker-compose.yml to the newer tag your deployment last ran, then:\n' >&2
+    printf '          %s up -d\n' "${COMPOSE[*]}" >&2
+    printf '        Policy: https://kanidm.github.io/kanidm/stable/support.html#upgrade-policy\n' >&2
+    exit 1
+  fi
+  die "Kanidm did not become ready in 120s — check: ${COMPOSE[*]} logs kanidm caddy"
+fi
 log "Kanidm is ready."
 
 # --- Bootstrap -------------------------------------------------------------------

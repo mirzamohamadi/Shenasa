@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Kanidm endpoints used by Shenasa
-  version: "0.1.0"
+  version: "0.2.0"
   description: |
     Reference for the Kanidm HTTP endpoints the Shenasa client calls.
 
@@ -435,12 +435,27 @@ paths:
       responses:
         "200": { description: Credential manager UI }
 
+  /v1/oauth2:
+    get:
+      tags: [apps]
+      summary: List OAuth2/OIDC clients (Apps page; role idm_oauth2_admins)
+      description: Route/method table verified against server/core/src/https/v1.rs (identical in 1.10.5 and 1.11.0).
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      responses:
+        "200":
+          description: Client entries
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Entry" } } } }
+
   /v1/oauth2/_public:
     post:
-      tags: [auth]
-      summary: Create a public OAuth2 resource server (PKCE, no secret)
-      description: Used by deploy/bootstrap.sh.
-      security: [{ bearerAuth: [] }]
+      tags: [apps]
+      summary: Create a public OAuth2 client (PKCE, no secret)
+      description: |
+        Used by deploy/bootstrap.sh and the Apps page. The `name` attribute
+        becomes the OIDC client_id. Verified shape for Kanidm 1.10/1.11 —
+        older guides that send `oauth2_rs_name` instead of `name` get
+        HTTP 500 InvalidEntryState.
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       requestBody:
         required: true
         content:
@@ -448,33 +463,48 @@ paths:
             schema: { $ref: "#/components/schemas/Entry" }
             example:
               attrs:
-                oauth2_rs_name: [shenasa_admin_ui]
-                displayname: [Shenasa Admin UI]
+                name: [my_app]
+                displayname: [My App]
+                oauth2_rs_origin_landing: ["https://app.example.com/oauth2/callback"]
+                oauth2_strict_redirect_uri: ["true"]
       responses:
         "200": { description: Created }
         "409": { $ref: "#/components/responses/Conflict" }
 
+  /v1/oauth2/_basic:
+    post:
+      tags: [apps]
+      summary: Create a basic (confidential) OAuth2 client — gets a basic secret
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Entry" }
+      responses:
+        "200": { description: Created }
+
   /v1/oauth2/{id}:
     get:
-      tags: [auth]
-      summary: Read an OAuth2 resource server
-      security: [{ bearerAuth: [] }]
+      tags: [apps]
+      summary: Read an OAuth2 client
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: "#/components/parameters/entryId" }]
       responses:
         "200":
-          description: Resource server entry
+          description: Client entry (attrs incl. oauth2_rs_origin_landing, oauth2_rs_origin, oauth2_rs_scope_map, oauth2_rs_sup_scope_map, oauth2_rs_claim_map, oauth2_strict_redirect_uri)
           content: { application/json: { schema: { $ref: "#/components/schemas/Entry" } } }
     patch:
-      tags: [auth]
-      summary: Configure redirect URLs, origins and scope maps
+      tags: [apps]
+      summary: Update an OAuth2 client — replaces ONLY the listed attributes
       description: |
         Key attributes:
-        * `oauth2_rs_origin_landing` — allowed redirect URLs (exact match).
-        * `oauth2_rs_origin` — the OAuth2 origin (scheme://host).
-        * `oauth2_rs_scope_map` — `group_spn:scope1,scope2,…` mapping group
-          members to scopes. The built-in `groups` scope emits the `groups`
-          claim (group SPNs) in tokens — Shenasa derives UI roles from it.
-      security: [{ bearerAuth: [] }]
+        * `oauth2_rs_origin_landing` — post-login landing URL.
+        * `oauth2_rs_origin` — exact redirect URIs (multi-valued, https).
+        * `oauth2_strict_redirect_uri` — "true"/"false" exact-match enforcement.
+        The built-in `groups` scope (assigned via `_{,sup_}scopemap`) emits
+        the `groups` claim (group SPNs) Shenasa derives UI roles from.
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
       parameters: [{ $ref: "#/components/parameters/entryId" }]
       requestBody:
         required: true
@@ -483,6 +513,217 @@ paths:
             schema: { $ref: "#/components/schemas/Entry" }
       responses:
         "200": { description: Updated }
+    delete:
+      tags: [apps]
+      summary: Delete an OAuth2 client
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/entryId" }]
+      responses:
+        "200": { description: Deleted }
+
+  /v1/oauth2/{id}/_basic_secret:
+    get:
+      tags: [apps]
+      summary: Reveal the CURRENT basic secret of a confidential client (plain string)
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/entryId" }]
+      responses:
+        "200": { description: The basic secret as a JSON string }
+
+  /v1/oauth2/{id}/_scopemap/{group}:
+    post:
+      tags: [apps]
+      summary: Set/replace the scope map for a group — body is a BARE JSON array of scopes
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/entryId" }
+        - { name: group, in: path, required: true, schema: { type: string }, description: "Group name or SPN (resolved server-side)" }
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { type: array, items: { type: string } }, example: ["openid", "profile", "email", "groups"] }
+      responses:
+        "200": { description: Scope map updated }
+    delete:
+      tags: [apps]
+      summary: Remove a group's scope map (no body)
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/entryId" }
+        - { name: group, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Removed }
+
+  /v1/oauth2/{id}/_sup_scopemap/{group}:
+    post:
+      tags: [apps]
+      summary: Set/replace a supplementary scope map — body is a bare JSON array
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/entryId" }
+        - { name: group, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { type: array, items: { type: string } } }
+      responses:
+        "200": { description: Updated }
+    delete:
+      tags: [apps]
+      summary: Remove a supplementary scope map
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/entryId" }
+        - { name: group, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Removed }
+
+  /v1/oauth2/{id}/_claimmap/{claim}/{group}:
+    post:
+      tags: [apps]
+      summary: Set/replace a claim map (claim + group → values) — body is a bare JSON array
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/entryId" }
+        - { name: claim, in: path, required: true, schema: { type: string } }
+        - { name: group, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { type: array, items: { type: string } }, example: ["engineering", "platform"] }
+      responses:
+        "200": { description: Updated }
+    delete:
+      tags: [apps]
+      summary: Remove a claim map for a group
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/entryId" }
+        - { name: claim, in: path, required: true, schema: { type: string } }
+        - { name: group, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Removed }
+
+  /v1/service_account:
+    get:
+      tags: [serviceaccounts]
+      summary: List service accounts (role idm_service_account_admins)
+      description: Verified against libs/client/src/service_account.rs (identical 1.10.5/1.11.0).
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      responses:
+        "200":
+          description: Service-account entries
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Entry" } } } }
+    post:
+      tags: [serviceaccounts]
+      summary: Create a service account — entry_managed_by is REQUIRED
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Entry" }
+            example:
+              attrs:
+                name: [svc-ci-deploy]
+                displayname: [CI Deployer]
+                entry_managed_by: [svc-managers]
+      responses:
+        "200": { description: Created }
+
+  /v1/service_account/{id}:
+    get:
+      tags: [serviceaccounts]
+      summary: Read a service account
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/entryId" }]
+      responses:
+        "200":
+          description: Entry
+          content: { application/json: { schema: { $ref: "#/components/schemas/Entry" } } }
+    patch:
+      tags: [serviceaccounts]
+      summary: Update a service account (attrs envelope, replace-per-attr)
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/entryId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Entry" }
+      responses:
+        "200": { description: Updated }
+    delete:
+      tags: [serviceaccounts]
+      summary: Delete a service account (its API tokens stop working)
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/entryId" }]
+      responses:
+        "200": { description: Deleted }
+
+  /v1/service_account/{id}/_api_token:
+    get:
+      tags: [serviceaccounts]
+      summary: List API tokens of a service account
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/entryId" }]
+      responses:
+        "200":
+          description: ApiToken list (proto/src/internal/token.rs)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    account_id: { type: string, format: uuid }
+                    token_id: { type: string, format: uuid }
+                    label: { type: string }
+                    expiry: { type: integer, nullable: true, description: "epoch seconds; null = never" }
+                    issued_at: { type: integer, description: "epoch seconds" }
+                    purpose: { type: string, enum: [readonly, readwrite], default: readonly }
+    post:
+      tags: [serviceaccounts]
+      summary: Issue an API token — full token returned ONCE in the response
+      description: Body is ApiTokenGenerate (proto/src/v1/mod.rs).
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/entryId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [label, read_write]
+              properties:
+                label: { type: string, example: ci-deploy }
+                expiry: { type: integer, nullable: true, description: "epoch seconds; null = never expires" }
+                read_write: { type: boolean, default: false }
+                compact: { type: boolean, default: false }
+      responses:
+        "200": { description: The FULL token as a JSON string — never retrievable again }
+
+  /v1/service_account/{id}/_api_token/{token_id}:
+    delete:
+      tags: [serviceaccounts]
+      summary: Revoke an API token by id (no body)
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/entryId" }
+        - { name: token_id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Revoked }
+
+  /v1/domain:
+    get:
+      tags: [domain]
+      summary: Domain info (dashboard domain card)
+      security: [{ bearerAuth: [] }, { cookieAuth: [] }]
+      responses:
+        "200":
+          description: Domain entry
+          content: { application/json: { schema: { $ref: "#/components/schemas/Entry" } } }
 
 components:
   securitySchemes:

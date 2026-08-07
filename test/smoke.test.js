@@ -104,7 +104,7 @@ async function main() {
   const env = loadModules();
 
   await test('config: defaults present and public (no secrets)', () => {
-    assertEq(env.SHENASA_CONFIG.apiUrl, 'https://idm.avvalman.ir/v1', 'default apiUrl');
+    assertEq(env.SHENASA_CONFIG.apiUrl, 'https://idm.example.com/v1', 'default apiUrl');
     assertEq(env.SHENASA_CONFIG.oidcClientId, 'shenasa_admin_ui', 'default clientId');
     assert(/^(light|dark|auto)$/.test(env.SHENASA_CONFIG.theme), 'theme enum');
     assertNotIncludes(JSON.stringify(env.SHENASA_CONFIG), 'secret', 'no secret keys');
@@ -494,6 +494,66 @@ async function main() {
     assert(!w.Store.canWriteNow(), 'no window, no writes');
   });
 
+  await test('store: server version detection + Kanidm compatibility matrix (1.10 & 1.11)', () => {
+    const w = loadModules({});
+    assertEq(w.Store.serverCompat(), 'unknown', 'no header captured yet -> unknown (never an error)');
+    // Supported range — both verified source trees (see README):
+    w.Store.setServerVersion('1.10.5');
+    assertEq(w.Store.serverCompat(), 'supported', '1.10.x supported');
+    w.Store.setServerVersion('1.11.0');
+    assertEq(w.Store.serverCompat(), 'supported', '1.11.x supported');
+    const p = w.Store.serverVersionParsed();
+    assertEq(p.major, 1, 'parsed major'); assertEq(p.minor, 11, 'parsed minor'); assertEq(p.patch, 0, 'parsed patch');
+    // Outside the verified range -> unsupported (honest, not a crash):
+    for (const bad of ['1.9.4', '1.12.0', '1.12.0-dev', '2.0.0', '0.9.9']) {
+      w.Store.setServerVersion(bad);
+      assertEq(w.Store.serverCompat(), 'unsupported', bad + ' -> unsupported');
+    }
+    // Whitespace is trimmed; garbage/non-strings are rejected and keep the
+    // previous value (a forged header must not flip the badge):
+    w.Store.setServerVersion('  1.10.5  ');
+    assertEq(w.Store.serverVersion, '1.10.5', 'header value trimmed');
+    w.Store.setServerVersion('garbage string with spaces');
+    assertEq(w.Store.serverVersion, '1.10.5', 'garbage rejected, previous kept');
+    w.Store.setServerVersion('<script>alert(1)</script>');
+    assertEq(w.Store.serverVersion, '1.10.5', 'markup rejected');
+    w.Store.setServerVersion(123);
+    assertEq(w.Store.serverVersion, '1.10.5', 'non-string rejected');
+  });
+
+  await test('API client: X-KANIDM-VERSION header feeds the compatibility store', async () => {
+    // The server stamps EVERY response (global version middleware in 1.10
+    // and 1.11 — server/core/src/https/middleware/mod.rs).
+    const w = loadModules({
+      fetch: async () => ({
+        ok: true, status: 200,
+        headers: { get: (h) => (String(h).toLowerCase() === 'x-kanidm-version' ? '1.11.0' : null) },
+        text: async () => '[]'
+      })
+    });
+    w.Store.user = { token: 'x' };
+    w.SHENASA_CONFIG.apiUrl = 'https://idm.example.test/v1';
+    await w.Api.listPeople();
+    assertEq(w.Store.serverVersion, '1.11.0', 'version captured from response header');
+    assertEq(w.Store.serverCompat(), 'supported', 'detected 1.11 is supported');
+    // Header absent/stripped (proxy, CORS expose) -> graceful 'unknown':
+    const w2 = loadModules({
+      fetch: async () => ({ ok: true, status: 200, headers: { get: () => null }, text: async () => '[]' })
+    });
+    w2.Store.user = { token: 'x' };
+    w2.SHENASA_CONFIG.apiUrl = 'https://idm.example.test/v1';
+    await w2.Api.listPeople();
+    assertEq(w2.Store.serverCompat(), 'unknown', 'absent header degrades to unknown, no crash');
+    // auth.js/api mocks without a headers property at all must not break:
+    const w3 = loadModules({
+      fetch: async () => ({ ok: true, status: 200, text: async () => '[]' })
+    });
+    w3.Store.user = { token: 'x' };
+    w3.SHENASA_CONFIG.apiUrl = 'https://idm.example.test/v1';
+    await w3.Api.listPeople();
+    assertEq(w3.Store.serverCompat(), 'unknown', 'no headers object tolerated');
+  });
+
   await test('step-up: POST /v1/reauth + passkey swaps in the r/w reissued token', async () => {
     // REAL reauth flow (verified against kanidm v1.10.5 reauth.rs +
     // libs/client reauth_passkey_begin/complete):
@@ -658,6 +718,104 @@ async function main() {
     assertEq(w.Api.selfEntry(bare).attrs.name[0], 'bob', 'bare entry tolerated');
   });
 
+  await test('API client: OAuth2 / service-account / domain wiring (verified 1.10+1.11 contracts)', async () => {
+    const calls = [];
+    const w = loadModules({
+      fetch: async (url, init) => {
+        calls.push({ url, method: init.method, body: init.body });
+        return { ok: true, status: 200, headers: { get: () => null }, text: async () => '{}' };
+      }
+    });
+    w.Store.user = { token: 'x' };
+    w.SHENASA_CONFIG.apiUrl = 'https://idm.example.test/v1';
+    await w.Api.listOauth2Clients();
+    await w.Api.getOauth2Client('next cloud');
+    await w.Api.createOauth2PublicClient({ name: 'nc', displayname: 'NC', originLanding: 'https://c.example.test/cb' });
+    await w.Api.createOauth2BasicClient({ name: 'api', displayname: 'API', originLanding: 'https://a.example.test/' });
+    await w.Api.updateOauth2Client('nc', { displayname: 'NC2', oauth2_rs_origin: ['https://c.example.test/cb'] });
+    await w.Api.deleteOauth2Client('nc');
+    await w.Api.getOauth2BasicSecret('api');
+    await w.Api.setOauth2ScopeMap('wiki', 'it team', ['openid', 'profile']);
+    await w.Api.deleteOauth2ScopeMap('wiki', 'it team');
+    await w.Api.setOauth2SupScopeMap('wiki', 'it', ['openid']);
+    await w.Api.deleteOauth2SupScopeMap('wiki', 'it');
+    await w.Api.setOauth2ClaimMap('wiki', 'department', 'it', ['eng']);
+    await w.Api.deleteOauth2ClaimMap('wiki', 'department', 'it');
+    await w.Api.listServiceAccounts();
+    await w.Api.createServiceAccount({ name: 'svc-ci', displayname: 'CI', entryManagedBy: 'svc-managers' });
+    await w.Api.listApiTokens('svc-ci');
+    await w.Api.generateApiToken('svc-ci', { label: 'ci', expiry: null, readWrite: true, compact: false });
+    await w.Api.deleteApiToken('svc-ci', 'tok-1');
+    await w.Api.getDomain();
+
+    const at = (m, path) => calls.find((c) => c.method === m && c.url === 'https://idm.example.test/v1' + path);
+    assert(at('GET', '/oauth2'), 'GET /v1/oauth2');
+    assert(at('GET', '/oauth2/next%20cloud'), 'client name URL-encoded in path');
+    assert(at('POST', '/oauth2/_public'), 'create public client endpoint');
+    assert(at('POST', '/oauth2/_basic'), 'create basic client endpoint');
+    var pub = at('POST', '/oauth2/_public');
+    var pubBody = JSON.parse(pub.body);
+    assertEq(pubBody.attrs.name[0], 'nc', 'create body is the attrs envelope');
+    assertEq(pubBody.attrs.oauth2_rs_origin_landing[0], 'https://c.example.test/cb', 'landing in attrs');
+    assertEq(pubBody.attrs.oauth2_strict_redirect_uri[0], 'true', 'strict redirect uri default true (bootstrap-verified shape)');
+    var patch = at('PATCH', '/oauth2/nc');
+    assert(patch, 'PATCH /oauth2/{rs}');
+    assertEq(JSON.parse(patch.body).attrs.oauth2_rs_origin[0], 'https://c.example.test/cb', 'PATCH replace-per-attr envelope');
+    assert(at('DELETE', '/oauth2/nc'), 'DELETE client');
+    assert(at('GET', '/oauth2/api/_basic_secret'), 'GET basic secret');
+    var sm = at('POST', '/oauth2/wiki/_scopemap/it%20team');
+    assert(sm, 'scope map POST path (group segment encoded)');
+    assertEq(JSON.parse(sm.body)[1], 'profile', 'scope map body is a BARE array of scopes');
+    assert(at('DELETE', '/oauth2/wiki/_scopemap/it%20team'), 'scope map DELETE');
+    assert(at('POST', '/oauth2/wiki/_sup_scopemap/it'), 'sup scope map POST');
+    assert(at('DELETE', '/oauth2/wiki/_sup_scopemap/it'), 'sup scope map DELETE');
+    assert(at('POST', '/oauth2/wiki/_claimmap/department/it'), 'claim map POST /_claimmap/{claim}/{group}');
+    assert(at('DELETE', '/oauth2/wiki/_claimmap/department/it'), 'claim map DELETE');
+    assert(at('GET', '/service_account'), 'list service accounts');
+    var svc = at('POST', '/service_account');
+    assert(svc, 'create service account POST');
+    assertEq(JSON.parse(svc.body).attrs.entry_managed_by[0], 'svc-managers', 'entry_managed_by REQUIRED in create body');
+    assert(at('GET', '/service_account/svc-ci/_api_token'), 'list API tokens');
+    var gen = at('POST', '/service_account/svc-ci/_api_token');
+    var genBody = JSON.parse(gen.body);
+    assertEq(genBody.label, 'ci', 'token label');
+    assertEq(genBody.expiry, null, 'no expiry serialises as null (ApiTokenGenerate serde timestamp option)');
+    assertEq(genBody.read_write, true, 'read_write flag');
+    assertEq(genBody.compact, false, 'compact flag');
+    assert(at('DELETE', '/service_account/svc-ci/_api_token/tok-1'), 'delete API token by id');
+    assert(at('GET', '/domain'), 'GET /v1/domain');
+  });
+
+  await test('RBAC: oauth2 + service-account role gates', () => {
+    const w = loadModules({});
+    w.Store.setUser({ name: 'a', roles: ['idm_oauth2_admins'], token: 'x', authMethod: 'sso' });
+    assert(w.Store.canManageOauth2(), 'idm_oauth2_admins -> manage oauth2');
+    assert(!w.Store.canManageServiceAccounts(), 'oauth role != service accounts');
+    w.Store.setUser({ name: 'b', roles: ['idm_service_account_admins'], token: 'x', authMethod: 'sso' });
+    assert(w.Store.canManageServiceAccounts(), 'idm_service_account_admins -> manage svc accounts');
+    assert(!w.Store.canManageOauth2(), 'svc role != oauth2');
+    w.Store.setUser({ name: 'c', roles: ['idm_admins', 'idm_people_admins'], token: 'x', authMethod: 'sso' });
+    assert(!w.Store.canManageOauth2(), 'idm_admins has NO oauth2 power (builtin ACPs)');
+    assert(!w.Store.canManageServiceAccounts(), 'idm_admins has NO service-account power');
+  });
+
+  await test('validation: oauth client / service account / api token forms', () => {
+    const w = loadModules({});
+    const V = w.Validation;
+    assert(!V.oauthClientForm({ name: 'Bad Name', displayname: 'X', originLanding: 'https://a.example.test/' }).ok, 'id with caps rejected');
+    assert(!V.oauthClientForm({ name: 'nc', displayname: 'X', originLanding: 'http://a.example.test/' }).ok, 'http landing rejected — Kanidm requires https');
+    assert(!V.oauthClientForm({ name: 'nc', displayname: 'X', originLanding: 'not-a-url' }).ok, 'garbage landing rejected');
+    assert(V.oauthClientForm({ name: 'nc', displayname: 'X', originLanding: 'https://a.example.test/cb' }).ok, 'https landing accepted');
+    assert(!V.serviceAccountForm({ name: 'svc-ci', displayname: 'CI', entryManagedBy: '' }).ok, 'managed-by REQUIRED (server rejects empty)');
+    assert(V.serviceAccountForm({ name: 'svc-ci', displayname: 'CI', entryManagedBy: 'svc-managers' }).ok, 'valid svc account form');
+    assert(!V.apiTokenForm({ label: '', expiry: '' }).ok, 'token label required');
+    assert(!V.apiTokenForm({ label: 'ci', expiry: 'next friday' }).ok, 'token expiry must be a real date when present');
+    assert(V.apiTokenForm({ label: 'ci', expiry: '' }).ok, 'empty expiry = never expires (allowed)');
+    assert(!V.tokenList('openid "profile"', 'scopes').ok, 'quote chars rejected in scope list');
+    assert(V.tokenList('openid profile,email groups', 'scopes').ok, 'space/comma separated scopes ok');
+    assertEq(V.parseTokenList('a b,c').length, 3, 'token list parser');
+  });
+
   await test('config: idleTimeoutMin parsing and clamping', () => {
     // Default = disabled.
     let w = loadModules({});
@@ -716,6 +874,25 @@ async function main() {
     assert(/^\d+\.\d+\.\d+$/.test(imgTag), `compose tag "${imgTag}" is a pinned semver release`);
     assert(!/^v/.test(imgTag), `compose tag "${imgTag}" must not use the git-style "v" prefix (Docker Hub has none)`);
     assert(imgTag !== 'latest' && imgTag !== 'devel', 'compose tag is not a drifting channel');
+    // The pinned release line must be one Shenasa declares support for —
+    // parsed straight from js/store.js so the two can never drift apart.
+    const storeSrc = readFile('js/store.js');
+    const supBlock = storeSrc.match(/SUPPORTED_KANIDM:\s*\[\[([\s\S]*?)\]\]/);
+    assert(supBlock, 'store.js exposes SUPPORTED_KANIDM');
+    const supportedLines = [...supBlock[1].matchAll(/(\d+)\s*,\s*(\d+)/g)].map((m) => `${m[1]}.${m[2]}`);
+    const pinnedLine = imgTag.split('.').slice(0, 2).join('.');
+    assert(supportedLines.includes(pinnedLine),
+      `compose pin ${imgTag} must sit on a supported Kanidm line (${supportedLines.join(' / ')})`);
+    // setup.sh must structurally prevent Kanidm DOWNGRADES: refuse a pin
+    // older than the deployed image, and diagnose the one-way-migration
+    // crash loop on readiness timeout (MG0010DowngradeNotAllowed is the
+    // exact upstream refusal, observed live: domain 15 → target 14).
+    const setupSh = readFile('deploy/setup.sh');
+    assertIncludes(setupSh, 'docker inspect', 'setup.sh reads the deployed image tag');
+    assertIncludes(setupSh, 'sort -V', 'setup.sh semver-compares image tags');
+    assertIncludes(setupSh, 'refusing to DOWNGRADE Kanidm', 'setup.sh aborts on an older image pin');
+    assertIncludes(setupSh, 'MG0010DowngradeNotAllowed', 'setup.sh diagnoses the downgrade crash loop');
+    assertIncludes(setupSh, 'upgrade-policy', 'setup.sh references the upstream upgrade policy');
     const serverToml = readFile('deploy/server.toml.example');
     assertIncludes(serverToml, 'tls_chain', 'server.toml TLS chain');
     assertIncludes(serverToml, 'bindaddress', 'server.toml bind address');
@@ -736,6 +913,24 @@ async function main() {
     assert(scripts.indexOf('config.js') < scripts.indexOf('api.js'), 'config before api');
     assert(scripts.indexOf('ui.js') < scripts.indexOf('pages.js'), 'ui before pages');
     assert(scripts.indexOf('pages.js') < scripts.indexOf('app.js'), 'pages before app');
+  });
+
+  await test('privacy: no private deployment identifiers in shipped sources', () => {
+    // Nothing in the public repo may name a real deployment (internal
+    // domains, hostnames); shipped defaults use *.example.com placeholders.
+    const files = ['index.html', 'README.md', 'SECURITY.md', 'CHANGELOG.md', 'css/styles.css',
+      'deploy/setup.sh', 'deploy/bootstrap.sh', 'deploy/seed.sh', 'deploy/README.md',
+      'deploy/docker-compose.yml', 'deploy/server.toml.example', 'deploy/Caddyfile.example',
+      'deploy/Caddyfile.ui', 'deploy/Dockerfile.ui',
+      'deploy/nginx/single-origin.conf.example', 'deploy/nginx/two-domain.conf.example',
+      'docs/ROADMAP.md', 'docs/USER-GUIDE.md'].concat(JS_FILES.map((f) => 'js/' + f));
+    for (const f of files) {
+      const m = readFile(f).match(/avvalman|fastcreate/i);
+      if (m) throw new Error(`${f} leaks a private deployment identifier: "${m[0]}"`);
+    }
+    const cfg = readFile('js/config.js');
+    assertIncludes(cfg, "apiUrl: 'https://idm.example.com/v1'", 'config.js default apiUrl is the example placeholder');
+    assertIncludes(cfg, "oidcRedirectUri: 'https://idm.example.com/oauth2/redirect'", 'config.js default redirect is the example placeholder');
   });
 
   await test('source: English-only (no Persian characters)', () => {
@@ -782,7 +977,26 @@ async function main() {
       session_id: 'sess-uuid-1', spn: 'alice@idm.example.test', displayname: 'Alice Admin',
       issued_at: '2026-08-01T10:00:00Z', expiry: '2026-08-01T14:00:00Z', purpose: 'ReadWrite'
     };
-    const calls = { revived: [] };
+    const fakeClients = [
+      { attrs: { name: ['nextcloud'], displayname: ['Nextcloud Files'], uuid: ['u-nc'],
+        class: ['object', 'oauth2_resource_server', 'oauth2_resource_server_basic'],
+        oauth2_rs_origin_landing: ['https://cloud.example.test/login'],
+        oauth2_strict_redirect_uri: ['true'],
+        oauth2_rs_origin: ['https://cloud.example.test/login'],
+        oauth2_rs_scope_map: ['it-team: [openid, profile, email]'],
+        oauth2_rs_claim_map: ['department: it-team: [engineering platform]'] } },
+      { attrs: { name: ['wiki'], displayname: ['Wiki'], uuid: ['u-wk'],
+        class: ['object', 'oauth2_resource_server'],
+        oauth2_rs_origin_landing: ['https://wiki.example.test/'] } }
+    ];
+    const fakeSvcAccounts = [
+      { attrs: { name: ['svc-ci'], displayname: ['CI Deployer'], entry_managed_by: ['svc-managers'], uuid: ['u-svc'] } }
+    ];
+    const fakeApiTokens = [
+      { token_id: 'tok-1', label: 'ci', issued_at: 1700000000, expiry: null, purpose: 'readwrite' },
+      { token_id: 'tok-2', label: 'poll', issued_at: 1700000001, expiry: 1893456000, purpose: 'readonly' }
+    ];
+    const calls = { revived: [], api: [] };
     function makeFakeApi() {
       return {
         attr: (e, n) => (e && e.attrs && e.attrs[n] ? e.attrs[n][0] : undefined),
@@ -810,7 +1024,29 @@ async function main() {
         updatePerson: async () => ({}),
         deletePerson: async () => null,
         addGroupMember: async () => null,
-        removeGroupMember: async () => null
+        removeGroupMember: async () => null,
+        // v1.1: apps / service accounts / domain fixtures
+        getDomain: async () => ({ attrs: { name: ['idm.example.test'], displayname: ['Example IdM'] } }),
+        listOauth2Clients: async () => fakeClients,
+        getOauth2Client: async (n) => fakeClients.find((c) => c.attrs.name[0] === n),
+        getOauth2BasicSecret: async () => 'BASIC-SECRET-123',
+        setOauth2ScopeMap: async () => ({}),
+        deleteOauth2ScopeMap: async () => null,
+        setOauth2SupScopeMap: async () => ({}),
+        deleteOauth2SupScopeMap: async () => null,
+        setOauth2ClaimMap: async () => ({}),
+        deleteOauth2ClaimMap: async () => null,
+        createOauth2PublicClient: async () => ({}),
+        createOauth2BasicClient: async () => ({}),
+        updateOauth2Client: async () => ({}),
+        deleteOauth2Client: async () => null,
+        listServiceAccounts: async () => fakeSvcAccounts,
+        getServiceAccount: async (n) => fakeSvcAccounts.find((s) => s.attrs.name[0] === n),
+        createServiceAccount: async (d) => d,
+        deleteServiceAccount: async () => null,
+        listApiTokens: async () => fakeApiTokens,
+        generateApiToken: async () => 'FULL-TOKEN-XYZ',
+        deleteApiToken: async () => null
       };
     }
 
@@ -914,7 +1150,7 @@ async function main() {
       w.App.route();
       await sleep(20);
       const view = w.document.getElementById('view');
-      assertEq(view.querySelectorAll('.stat-card').length, 4, 'four stat cards');
+      assertEq(view.querySelectorAll('.stat-card').length, 5, 'five stat cards (4 stats + domain card from GET /v1/domain)');
       assert(view.querySelectorAll('.chart svg').length >= 3, 'pie + bars + ring charts');
       assertIncludes(view.innerHTML, 'Your roles', 'roles card');
       assertIncludes(view.innerHTML, 'idm_admins', 'role chip');
@@ -1120,6 +1356,124 @@ async function main() {
       dom.window.close();
     });
 
+    await test('nav + gating: Apps/Service-accounts items only with their roles', async () => {
+      const dom = makeDom(['idm_oauth2_admins', 'idm_service_account_admins']);
+      const w = dom.window;
+      w.location.hash = '#/dashboard';
+      w.App.route();
+      await sleep(20);
+      const links = [...w.document.querySelectorAll('.nav-link')].map((a) => a.getAttribute('href'));
+      assert(links.indexOf('#/apps') >= 0, 'Apps visible for idm_oauth2_admins');
+      assert(links.indexOf('#/svcaccounts') >= 0, 'Service accounts visible for role');
+      dom.window.close();
+      const dom2 = makeDom(['idm_people_admins']);
+      const w2 = dom2.window;
+      w2.location.hash = '#/dashboard';
+      w2.App.route();
+      await sleep(20);
+      const links2 = [...w2.document.querySelectorAll('.nav-link')].map((a) => a.getAttribute('href'));
+      assert(links2.indexOf('#/apps') < 0, 'Apps hidden without idm_oauth2_admins');
+      assert(links2.indexOf('#/svcaccounts') < 0, 'Service accounts hidden without role');
+      dom2.window.close();
+    });
+
+    await test('apps: list renders clients with type badges; detail shows maps + secret + strict toggle', async () => {
+      const dom = makeDom(['idm_oauth2_admins']);
+      const w = dom.window;
+      w.location.hash = '#/apps';
+      w.App.route();
+      await sleep(30);
+      const view = w.document.getElementById('view');
+      assertIncludes(view.innerHTML, 'nextcloud', 'client row rendered');
+      assertIncludes(view.innerHTML, 'basic (secret)', 'basic badge for nextcloud (class/attr derived)');
+      assertIncludes(view.innerHTML, 'public (PKCE)', 'public badge for wiki');
+      // detail: renderShell replaces #view on each route — re-query after
+      // navigating, a stale element would still show the LIST page.
+      w.location.hash = '#/apps/nextcloud';
+      w.App.route();
+      await sleep(30);
+      const view2 = w.document.getElementById('view');
+      assertIncludes(view2.innerHTML, 'App:', 'detail page rendered');
+      assertIncludes(view2.innerHTML, 'https://cloud.example.test/login', 'landing shown');
+      assert(view2.querySelector('[data-strict]'), 'strict toggle present');
+      assertEq(view2.querySelector('[data-strict]').checked, true, 'strict on per server value');
+      assert(view2.querySelector('[data-reveal-secret]'), 'reveal-secret only for basic clients');
+      assertIncludes(view2.innerHTML, 'it-team', 'scope map group parsed from text form');
+      assertIncludes(view2.innerHTML, 'openid, profile, email'.split(',')[0], 'scope map scopes shown');
+      assertIncludes(view2.innerHTML, 'department', 'claim map claim parsed (two-key form)');
+      assertIncludes(view2.innerHTML, 'engineering platform', 'claim values shown');
+      assert(view2.querySelector('[data-map-del="scope:0"]'), 'parsed scope row actionable');
+      assert(view2.querySelector('[data-map-del="claim:0"]'), 'parsed claim row actionable');
+      // origins list + strict toggle are real PATCH-backed controls:
+      assert(view2.querySelector('[data-origin-add]'), 'add redirect URI control');
+      dom.window.close();
+    });
+
+    await test('apps: public client detail has NO secret button (not a fake control)', async () => {
+      const dom = makeDom(['idm_oauth2_admins']);
+      const w = dom.window;
+      w.location.hash = '#/apps/wiki';
+      w.App.route();
+      await sleep(30);
+      const view = w.document.getElementById('view');
+      assert(!view.querySelector('[data-reveal-secret]'), 'no secret reveal for public client');
+      assertIncludes(view.innerHTML, 'no secret by design', 'explanation shown instead');
+      dom.window.close();
+    });
+
+    await test('apps/svc denied views without roles (deep link safe)', async () => {
+      const dom = makeDom(['idm_people_admins']);
+      const w = dom.window;
+      w.location.hash = '#/apps';
+      w.App.route();
+      await sleep(20);
+      assertIncludes(w.document.getElementById('view').innerHTML, 'idm_oauth2_admins', 'apps deep link names required role');
+      w.location.hash = '#/svcaccounts';
+      w.App.route();
+      await sleep(20);
+      assertIncludes(w.document.getElementById('view').innerHTML, 'idm_service_account_admins', 'svc deep link names required role');
+      dom.window.close();
+    });
+
+    await test('service accounts: list, token table with ro/rw badges, issue modal shows token ONCE with QR', async () => {
+      const dom = makeDom(['idm_service_account_admins']);
+      const w = dom.window;
+      w.location.hash = '#/svcaccounts/svc-ci';
+      w.App.route();
+      await sleep(30);
+      const view = w.document.getElementById('view');
+      assertIncludes(view.innerHTML, 'svc-ci', 'account shown');
+      assertIncludes(view.innerHTML, 'svc-managers', 'managed-by shown');
+      assertIncludes(view.innerHTML, 'read-write', 'rw badge for tok-1 (purpose readwrite)');
+      assertIncludes(view.innerHTML, 'read-only', 'ro badge for tok-2');
+      assertIncludes(view.innerHTML, 'never', 'null expiry renders as never');
+      assert(view.querySelector('[data-token-del^="tok-1"]'), 'delete token wired by token_id');
+      // open the issue dialog and submit:
+      view.querySelector('[data-token-new]').click();
+      await sleep(10);
+      const overlay = w.document.querySelector('.modal-overlay');
+      assert(overlay, 'issue dialog opened');
+      overlay.querySelector('[name=label]').value = 'ci-deploy';
+      overlay.querySelector('[name=readWrite]').checked = true;
+      overlay.querySelector('[data-submit]').click();
+      await sleep(30);
+      const modal2 = w.document.querySelector('.modal-overlay .modal-body');
+      assert(modal2 && modal2.textContent.indexOf('FULL-TOKEN-XYZ') >= 0, 'full token shown exactly once post-issue');
+      assertIncludes(modal2.innerHTML, 'only time', 'one-time warning copy');
+      assert(modal2.querySelector('.qr-box svg'), 'QR for the token rendered');
+      dom.window.close();
+    });
+
+    await test('dashboard: domain stat card renders from GET /v1/domain (tolerant)', async () => {
+      const dom = makeDom(['idm_admins']);
+      const w = dom.window;
+      w.location.hash = '#/dashboard';
+      w.App.route();
+      await sleep(30);
+      assertIncludes(w.document.getElementById('view').innerHTML, 'Example IdM', 'domain display name in stat card');
+      dom.window.close();
+    });
+
     await test('idle watchdog: inactive session is fully signed out', async () => {
       const dom = makeDom([]);
       const w = dom.window;
@@ -1166,6 +1520,10 @@ async function main() {
       assert(view.querySelector('[data-settings-test]'), 'test-connection button');
       assertEq(view.querySelector('[name=apiUrl]').value, 'https://idm.example.test/v1', 'apiUrl from URL override');
       assertEq(view.querySelector('[name=oauthBase]').value, 'https://idm.example.test', 'derived origin root shown');
+      // Live server compatibility row (X-KANIDM-VERSION driven):
+      assert(view.querySelector('[data-server-version-row]'), 'server version row rendered');
+      assertEq(view.querySelector('[data-server-version]').textContent, '—', 'no API call yet -> version undetected');
+      assert(view.querySelector('[data-server-version-row] .badge'), 'compat badge rendered');
       const low = view.innerHTML.toLowerCase();
       assertNotIncludes(low, 'mock', 'no mock mode');
       assertNotIncludes(low, 'demo', 'no demo mode');

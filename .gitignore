@@ -1,0 +1,16 @@
+# dependencies (tests only — package-lock.json IS committed for reproducible CI)
+node_modules/
+
+# generated deployment artifacts (may contain secrets)
+deploy/out/
+deploy/ui/
+deploy/tls/
+
+# build output
+dist/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.log

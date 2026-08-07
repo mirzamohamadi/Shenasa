@@ -11,7 +11,9 @@ policy covers the Shenasa repository (UI, deploy layer, scripts).
 Please report vulnerabilities **privately**. Do not open public issues for
 security problems.
 
-- Email: **security@avvalman.ir** (or the address listed on the project page)
+- Report via **GitHub private vulnerability reporting** (*Security →
+  Advisories → Report a vulnerability* on the repository page), or the
+  contact address listed in the repository profile/README.
 - Include: affected versions, reproduction steps, impact, and whether a
   working exploit exists.
 - We aim to acknowledge within **3 business days** and provide a fix or

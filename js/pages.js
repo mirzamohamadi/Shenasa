@@ -75,11 +75,21 @@
       }
       var user = global.Store.user || { roles: [] };
 
+      // Server domain card — GET /v1/domain. Tolerant: some roles cannot
+      // read domain info; the dashboard must still render without it.
+      var domainLabel = '';
+      try {
+        var dom = await global.Api.getDomain();
+        domainLabel = global.Api.attr(dom, 'displayname') ||
+          global.Api.attr(dom, 'name') || global.Api.attr(dom, 'domain_name') || '';
+      } catch (e) { domainLabel = ''; }
+
       var cards = '<div class="stat-grid">' +
         statCard(t('dash.totalUsers'), stats.totalUsers) +
         statCard(t('dash.totalGroups'), stats.totalGroups) +
         statCard(t('dash.activeUsers'), active) +
         statCard(t('dash.passkeyOnly'), stats.passkeyOnlyUsers) +
+        (domainLabel ? statCard(t('dash.domain'), domainLabel) : '') +
         '</div>';
 
       var charts = '<div class="grid-3">' +
@@ -1015,6 +1025,602 @@
   }
 
   // ======================================================================
+  // Apps (OAuth2/OIDC clients) — GET/POST/PATCH/DELETE /v1/oauth2*
+  // Route + payload shapes verified against server/core/src/https/v1.rs and
+  // libs/client/src/oauth.rs (identical in 1.10.5 and 1.11.0). UI gate:
+  // idm_oauth2_admins (server always re-authorises).
+  // ======================================================================
+  // OAuth2 scope/claim/sup maps are multi-valued attrs whose values map a
+  // GROUP to scopes/values. Their serialized shape is server-versioned, so
+  // we parse tolerantly: JSON object form first, then a
+  // "group: [scope, scope…]" text form, else show the raw value and disable
+  // row actions that would need a parsed group (never guess wrong at the
+  // server).
+  function parseMapRows(rawValues, twoKey) {
+    var rows = [];
+    for (var i = 0; i < rawValues.length; i++) {
+      var raw = String(rawValues[i]);
+      var claim = '', group = '', join = '';
+      try {
+        var j = JSON.parse(raw);
+        var g = j && (j.group || j.spn || j.name || j.uuid);
+        var sc = j && (j.scopes || j.values || j.claim_values);
+        if (g) {
+          group = String(g);
+          claim = j && j.claim ? String(j.claim) : '';
+          join = typeof sc === 'string' ? sc :
+            (sc && typeof sc.length === 'number' ? sc.join(' ') : '');
+        }
+      } catch (e) { /* not JSON — try text forms */ }
+      if (!group && twoKey) {
+        // Claim maps serialize per claim+group: "claim: group: [values]".
+        var m2 = /^\s*("?)([^:\s"]+)\1\s*:\s*("?)([^:\s"]+)\3\s*:\s*(\[[^\]]*\]|.+?)\s*$/.exec(raw);
+        if (m2) {
+          claim = m2[2]; group = m2[4];
+          join = m2[5].replace(/[\[\]"]/g, ' ').replace(/\s+/g, ' ').trim();
+        }
+      }
+      if (!group && !twoKey) {
+        // Scope/sup maps serialize per group: "group: [scope, scope]".
+        var m = /^\s*("?)([^:\s"]+)\1\s*:\s*(\[[^\]]*\]|.+?)\s*$/.exec(raw);
+        if (m) { group = m[2]; join = m[3].replace(/[\[\]"]/g, ' ').replace(/\s+/g, ' ').trim(); }
+      }
+      // A row is only actionable when every key its endpoint needs was
+      // parsed: scope/sup need the group; claims need claim AND group.
+      var known = twoKey ? !!(claim && group) : !!group;
+      rows.push({
+        raw: raw,
+        claim: claim,
+        group: group,
+        scopes: join || raw,   // display text (falls back to raw)
+        known: known
+      });
+    }
+    return rows;
+  }
+
+  function mapSectionHtml(title, hint, rows, sectionKey, canManage) {
+    var body = '<p class="muted">' + esc(hint) + '</p>';
+    if (!rows.length) {
+      body += '<p class="muted">' + esc(t('common.none')) + '</p>';
+    } else {
+      body += '<div class="table-wrap"><table class="table"><thead><tr><th>' + esc(t('apps.group')) + '</th>' +
+        '<th>' + esc(t('apps.values')) + '</th><th></th></tr></thead><tbody>';
+      for (var i = 0; i < rows.length; i++) {
+        body += '<tr><td><code>' + esc(rows[i].group || '—') + '</code></td>' +
+          '<td class="break-all">' + esc(rows[i].scopes) + '</td>' +
+          '<td class="row-actions">' +
+          (canManage
+            ? '<button class="btn btn-sm" data-map-edit="' + sectionKey + ':' + i + '"' + (rows[i].known ? '' : ' disabled title="' + esc(t('apps.map.unparsed')) + '"') + '>' + esc(t('common.edit')) + '</button> ' +
+              '<button class="btn btn-sm btn-danger" data-map-del="' + sectionKey + ':' + i + '"' + (rows[i].known ? '' : ' disabled title="' + esc(t('apps.map.unparsed')) + '"') + '>' + esc(t('common.delete')) + '</button>'
+            : '') +
+          '</td></tr>';
+      }
+      body += '</tbody></table></div>';
+    }
+    if (canManage) {
+      body += '<p><button class="btn" data-map-add="' + sectionKey + '">' + esc(t('apps.map.add')) + '</button></p>';
+    }
+    return card(title, body);
+  }
+
+  function oauthClientDialog(root, existing) {
+    var isEdit = !!existing;
+    var body = html`
+      <form data-client-form novalidate>
+        ${!isEdit ? '<div class="field"><label class="label" for="f-ctype">' + esc(t('apps.field.type')) + '</label>' +
+          '<select class="input" id="f-ctype" name="clientType">' +
+          '<option value="public">' + esc(t('apps.type.public')) + '</option>' +
+          '<option value="basic">' + esc(t('apps.type.basic')) + '</option>' +
+          '</select><p class="help">' + esc(t('apps.field.type.help')) + '</p></div>' : ''}
+        ${global.Ui.fieldHtml({ name: 'name', label: t('apps.field.name'), value: isEdit ? existing.name : '', required: true, readonly: isEdit, help: isEdit ? t('apps.field.name.immutable') : t('apps.field.name.help') })}
+        ${global.Ui.fieldHtml({ name: 'displayname', label: t('apps.field.displayName'), value: isEdit ? existing.displayname : '', required: true })}
+        ${global.Ui.fieldHtml({ name: 'originLanding', label: t('apps.field.landing'), value: isEdit ? existing.landing : '', required: true, placeholder: 'https://app.example.com/oauth2/callback', help: t('apps.field.landing.help') })}
+      </form>`;
+    var foot = '<button class="btn" data-cancel>' + esc(t('common.cancel')) + '</button>' +
+      '<button class="btn btn-primary" data-submit>' + esc(t('common.save')) + '</button>';
+    global.Ui.openModal({
+      title: isEdit ? t('apps.edit.title') : t('apps.create.title'),
+      body: body,
+      footer: foot,
+      onMount: function (el, close) {
+        el.querySelector('[data-cancel]').addEventListener('click', close);
+        el.querySelector('[data-submit]').addEventListener('click', async function () {
+          var form = el.querySelector('[data-client-form]');
+          var data = {
+            name: form.querySelector('[name=name]').value.trim(),
+            displayname: form.querySelector('[name=displayname]').value.trim(),
+            originLanding: form.querySelector('[name=originLanding]').value.trim()
+          };
+          var result = global.Validation.oauthClientForm(data, { skipName: isEdit });
+          if (!result.ok) { global.Ui.showFieldErrors(el, result.errors); return; }
+          try {
+            if (isEdit) {
+              await global.Api.updateOauth2Client(existing.name, {
+                displayname: data.displayname,
+                oauth2_rs_origin_landing: data.originLanding
+              });
+              close(); global.Ui.toast(t('common.saved'), 'success');
+              Pages.appDetail(root, existing.name);
+            } else {
+              var kind = (form.querySelector('[name=clientType]') || {}).value || 'public';
+              var fn = kind === 'basic' ? 'createOauth2BasicClient' : 'createOauth2PublicClient';
+              await global.Api[fn](data);
+              global.Ui.toast(t('apps.created'), 'success');
+              close();
+              Pages.appDetail(root, data.name);
+            }
+          } catch (err) {
+            if (err && err.status === 400 && err.message) global.Ui.toast(err.message, 'error');
+            else global.Ui.handleError(err, 'oauth2');
+          }
+        });
+      }
+    });
+  }
+
+  Pages.apps = async function (root) {
+    root.setAttribute('data-page', 'apps');
+    if (!global.Store.canManageOauth2()) {
+      root.innerHTML = '<h1 class="page-title">' + esc(t('apps.title')) + '</h1>' +
+        card(null, '<p class="muted">' + esc(t('apps.denied')) + '</p>');
+      return;
+    }
+    root.innerHTML = '<h1 class="page-title">' + esc(t('apps.title')) + '</h1>' + global.Ui.spinner();
+    try {
+      var items = (await global.Api.listOauth2Clients()) || [];
+      items.sort(function (a, b) {
+        return (global.Api.attr(a, 'name') || '').localeCompare(global.Api.attr(b, 'name') || '');
+      });
+      var body = '<div class="toolbar"><input class="input" type="search" data-filter placeholder="' +
+        esc(t('apps.search')) + '" aria-label="' + esc(t('apps.search')) + '" />' +
+        '<button class="btn btn-primary" data-new-client>' + esc(t('apps.new')) + '</button></div>';
+      if (!items.length) {
+        body += card(null, '<p class="muted">' + esc(t('apps.empty')) + '</p>');
+      } else {
+        body += '<div class="table-wrap"><table class="table" data-rows><thead><tr>' +
+          '<th>' + esc(t('apps.field.name')) + '</th><th>' + esc(t('apps.field.displayName')) + '</th>' +
+          '<th>' + esc(t('apps.field.type')) + '</th><th>' + esc(t('apps.field.landing')) + '</th>' +
+          '<th>' + esc(t('apps.scopeMaps')) + '</th></tr></thead><tbody>';
+        for (var i = 0; i < items.length; i++) {
+          var en = items[i];
+          var nm = global.Api.attr(en, 'name') || '';
+          var dm = global.Api.attr(en, 'displayname') || '—';
+          var landing = global.Api.attr(en, 'oauth2_rs_origin_landing') || '—';
+          var sm = global.Api.attrs(en, 'oauth2_rs_scope_map');
+          var classes = global.Api.attrs(en, 'class');
+          var isBasic = classes.indexOf('oauth2_resource_server_basic') >= 0 ||
+            global.Api.attrs(en, 'oauth2_rs_basic_secret').length > 0;
+          body += '<tr data-name="' + esc((nm + ' ' + dm).toLowerCase()) + '">' +
+            '<td><a href="#/apps/' + encodeURIComponent(nm) + '"><code>' + esc(nm) + '</code></a></td>' +
+            '<td>' + esc(dm) + '</td>' +
+            '<td><span class="badge ' + (isBasic ? 'badge-info' : 'badge-muted') + '">' + esc(isBasic ? t('apps.type.basic') : t('apps.type.public')) + '</span></td>' +
+            '<td class="break-all">' + esc(landing) + '</td>' +
+            '<td>' + sm.length + '</td></tr>';
+        }
+        body += '</tbody></table></div>';
+      }
+      body += '<p class="muted">' + esc(t('apps.note')) + '</p>';
+      root.innerHTML = '<h1 class="page-title">' + esc(t('apps.title')) + '</h1>' + body;
+      root.querySelector('[data-new-client]').addEventListener('click', function () {
+        oauthClientDialog(root, null);
+      });
+      var filter = root.querySelector('[data-filter]');
+      filter.addEventListener('input', global.Ui.debounce(function () {
+        var q = filter.value.trim().toLowerCase();
+        var rows = root.querySelectorAll('[data-rows] tbody tr');
+        for (var i = 0; i < rows.length; i++) {
+          rows[i].style.display = !q || rows[i].getAttribute('data-name').indexOf(q) >= 0 ? '' : 'none';
+        }
+      }, 120));
+    } catch (err) {
+      global.Ui.handleError(err, 'oauth2');
+    }
+  };
+
+  Pages.appDetail = async function (root, name) {
+    root.setAttribute('data-page', 'app');
+    root.innerHTML = '<h1 class="page-title">' + esc(t('apps.detail.title')) + '</h1>' + global.Ui.spinner();
+    if (!global.Store.canManageOauth2()) {
+      root.innerHTML = '<h1 class="page-title">' + esc(t('apps.detail.title')) + '</h1>' +
+        card(null, '<p class="muted">' + esc(t('apps.denied')) + '</p>');
+      return;
+    }
+    try {
+      var en = await global.Api.getOauth2Client(name);
+      var canManage = true; // page itself is role-gated
+      var classes = global.Api.attrs(en, 'class');
+      var isBasic = classes.indexOf('oauth2_resource_server_basic') >= 0 ||
+        global.Api.attrs(en, 'oauth2_rs_basic_secret').length > 0;
+      var displayname = global.Api.attr(en, 'displayname') || '';
+      var landing = global.Api.attr(en, 'oauth2_rs_origin_landing') || '';
+      var strict = (global.Api.attr(en, 'oauth2_strict_redirect_uri') || 'false') === 'true';
+      var origins = global.Api.attrs(en, 'oauth2_rs_origin');
+      var uuid = global.Api.attr(en, 'uuid') || '';
+
+      var head = '<div class="toolbar">' +
+        '<button class="btn" data-edit-client>' + esc(t('common.edit')) + '</button>' +
+        '<button class="btn btn-danger" data-del-client>' + esc(t('common.delete')) + '</button></div>';
+      var info = '<dl class="detail-list">' +
+        '<dt>' + esc(t('apps.field.name')) + '</dt><dd><code>' + esc(name) + '</code></dd>' +
+        '<dt>' + esc(t('apps.field.displayName')) + '</dt><dd>' + esc(displayname || '—') + '</dd>' +
+        '<dt>' + esc(t('apps.field.type')) + '</dt><dd><span class="badge ' + (isBasic ? 'badge-info' : 'badge-muted') + '">' + esc(isBasic ? t('apps.type.basic') : t('apps.type.public')) + '</span></dd>' +
+        '<dt>' + esc(t('apps.field.landing')) + '</dt><dd class="break-all">' + esc(landing || '—') + '</dd>' +
+        '<dt>' + esc(t('apps.field.strict')) + '</dt><dd>' +
+        '<label class="check"><input type="checkbox" data-strict ' + (strict ? 'checked' : '') + ' /> ' + esc(t('apps.field.strict.on')) + '</label>' +
+        '<p class="help">' + esc(t('apps.field.strict.help')) + '</p></dd>' +
+        '<dt>' + esc(t('apps.field.uuid')) + '</dt><dd><code class="muted">' + esc(uuid || '—') + '</code></dd>' +
+        '</dl>';
+      var originsBody = '<p class="muted">' + esc(t('apps.origins.help')) + '</p>';
+      if (origins.length) {
+        originsBody += '<ul class="token-list">';
+        for (var oi = 0; oi < origins.length; oi++) {
+          originsBody += '<li><code class="break-all">' + esc(origins[oi]) + '</code> ' +
+            '<button class="btn btn-sm btn-danger" data-origin-del="' + oi + '">×</button></li>';
+        }
+        originsBody += '</ul>';
+      } else {
+        originsBody += '<p class="muted">' + esc(t('apps.origins.empty')) + '</p>';
+      }
+      originsBody += '<div class="btn-row"><input class="input" data-origin-new placeholder="https://app.example.com/oauth2/callback" />' +
+        '<button class="btn" data-origin-add>' + esc(t('apps.origins.add')) + '</button></div>';
+
+      var scopeRows = parseMapRows(global.Api.attrs(en, 'oauth2_rs_scope_map'), false);
+      var supRows = parseMapRows(global.Api.attrs(en, 'oauth2_rs_sup_scope_map'), false);
+      var claimRows = parseMapRows(global.Api.attrs(en, 'oauth2_rs_claim_map'), true);
+
+      var secretBody = isBasic
+        ? '<p class="muted">' + esc(t('apps.secret.help')) + '</p>' +
+          '<button class="btn" data-reveal-secret>' + esc(t('apps.secret.reveal')) + '</button>'
+        : '<p class="muted">' + esc(t('apps.secret.public')) + '</p>';
+
+      root.innerHTML = '<h1 class="page-title">' + esc(t('apps.detail.title')) + ': <code>' + esc(name) + '</code></h1>' +
+        head +
+        card(null, info) +
+        card(t('apps.origins'), originsBody) +
+        mapSectionHtml(t('apps.scopeMaps'), t('apps.scopeMaps.help'), scopeRows, 'scope', canManage) +
+        mapSectionHtml(t('apps.supScopeMaps'), t('apps.supScopeMaps.help'), supRows, 'sup', canManage) +
+        mapSectionHtml(t('apps.claimMaps'), t('apps.claimMaps.help'), claimRows, 'claim', canManage) +
+        card(t('apps.secret'), secretBody);
+
+      root.querySelector('[data-edit-client]').addEventListener('click', function () {
+        oauthClientDialog(root, { name: name, displayname: displayname, landing: landing });
+      });
+      root.querySelector('[data-del-client]').addEventListener('click', function () {
+        global.Ui.confirmDialog(t('apps.delete.confirm', { name: name }), async function () {
+          await global.Api.deleteOauth2Client(name);
+          global.Ui.toast(t('apps.deleted'), 'success');
+          global.location.hash = '#/apps';
+        }, { danger: true, confirmLabel: t('common.delete') });
+      });
+      root.querySelector('[data-strict]').addEventListener('change', async function (ev) {
+        var on = !!ev.target.checked;
+        ev.target.disabled = true;
+        try {
+          await global.Api.updateOauth2Client(name, { oauth2_strict_redirect_uri: on ? 'true' : 'false' });
+          global.Ui.toast(t('common.saved'), 'success');
+        } catch (err) {
+          ev.target.checked = !on;
+          global.Ui.handleError(err, 'oauth2');
+        } finally { ev.target.disabled = false; }
+      });
+
+      async function saveOrigins(list) {
+        var attrs = {};
+        if (list.length) attrs.oauth2_rs_origin = list;
+        await global.Api.updateOauth2Client(name, attrs);
+        Pages.appDetail(root, name);
+      }
+      var addO = root.querySelector('[data-origin-add]');
+      addO.addEventListener('click', async function () {
+        var v = root.querySelector('[data-origin-new]').value.trim();
+        var r = global.Validation.httpsUrl(v, 'Redirect URL');
+        if (!r.ok) { global.Ui.toast(r.message, 'error'); return; }
+        if (origins.indexOf(v) >= 0) { global.Ui.toast(t('apps.origins.duplicate'), 'error'); return; }
+        try { await saveOrigins(origins.concat([v])); }
+        catch (err) { global.Ui.handleError(err, 'oauth2'); }
+      });
+      var delBtns = root.querySelectorAll('[data-origin-del]');
+      for (var db = 0; db < delBtns.length; db++) {
+        delBtns[db].addEventListener('click', async function () {
+          var idx = Number(this.getAttribute('data-origin-del'));
+          var list = origins.slice(); list.splice(idx, 1);
+          try { await saveOrigins(list); }
+          catch (err) { global.Ui.handleError(err, 'oauth2'); }
+        });
+      }
+      var rev = root.querySelector('[data-reveal-secret]');
+      if (rev) rev.addEventListener('click', async function () {
+        rev.disabled = true;
+        try {
+          var secret = await global.Api.getOauth2BasicSecret(name);
+          var body = '<p>' + esc(t('apps.secret.warning')) + '</p>' +
+            '<p><code class="break-all">' + esc(String(secret)) + '</code></p>' +
+            '<button class="btn" data-copy-secret>' + esc(t('common.copy')) + '</button>';
+          var m = global.Ui.openModal({ title: t('apps.secret'), body: body, wide: true });
+          var b = m.el.querySelector('[data-copy-secret]');
+          if (b) b.addEventListener('click', function () { global.Ui.copyText(String(secret)); });
+        } catch (err) {
+          global.Ui.handleError(err, 'oauth2');
+        } finally { rev.disabled = false; }
+      });
+
+      // ---- map sections (scope / sup / claim) --------------------------
+      var maps = { scope: scopeRows, sup: supRows, claim: claimRows };
+      async function mapRemove(section, idx) {
+        var row = maps[section][idx];
+        if (!row || !row.known) return;
+        global.Ui.confirmDialog(t('apps.map.remove.confirm', { group: section === 'claim' ? row.claim + ' / ' + row.group : row.group }), async function () {
+          if (section === 'scope') await global.Api.deleteOauth2ScopeMap(name, row.group);
+          else if (section === 'sup') await global.Api.deleteOauth2SupScopeMap(name, row.group);
+          else await global.Api.deleteOauth2ClaimMap(name, row.claim, row.group);
+          global.Ui.toast(t('common.deleted'), 'success');
+          Pages.appDetail(root, name);
+        }, { danger: true, confirmLabel: t('common.delete') });
+      }
+      function mapDialog(section, idx) {
+        var editRow = idx != null ? maps[section][idx] : null;
+        var isClaim = section === 'claim';
+        var groupDefault = editRow && editRow.known ? editRow.group : '';
+        var scopesDefault = editRow && editRow.known ? editRow.scopes : (isClaim ? '' : 'openid profile email groups');
+        var body = html`
+          <form data-map-form novalidate>
+            ${isClaim ? global.Ui.fieldHtml({ name: 'claim', label: t('apps.claim'), value: editRow && editRow.claim ? editRow.claim : '', required: true, readonly: !!editRow, help: t('apps.claim.help') }) : ''}
+            ${global.Ui.fieldHtml({ name: 'group', label: t('apps.group'), value: groupDefault, required: true, readonly: !!editRow, help: t('apps.group.help') })}
+            ${global.Ui.fieldHtml({ name: 'values', label: t('apps.values'), value: scopesDefault, required: true, help: t('apps.values.help') })}
+          </form>`;
+        var foot = '<button class="btn" data-cancel>' + esc(t('common.cancel')) + '</button>' +
+          '<button class="btn btn-primary" data-submit>' + esc(t('common.save')) + '</button>';
+        global.Ui.openModal({
+          title: isClaim ? t('apps.claim.add') : t('apps.map.add'),
+          body: body, footer: foot,
+          onMount: function (el, close) {
+            el.querySelector('[data-cancel]').addEventListener('click', close);
+            el.querySelector('[data-submit]').addEventListener('click', async function () {
+              var form = el.querySelector('[data-map-form]');
+              var group = form.querySelector('[name=group]').value.trim();
+              var valuesRaw = form.querySelector('[name=values]').value.trim();
+              var claim = isClaim ? form.querySelector('[name=claim]').value.trim() : '';
+              var errs = {};
+              var vres = global.Validation.tokenList(valuesRaw, t('apps.values'));
+              if (!vres.ok) errs.values = vres.message;
+              if (global.Validation.parseTokenList(group).length !== 1) errs.group = t('apps.group.invalid');
+              if (isClaim && global.Validation.parseTokenList(claim).length !== 1) errs.claim = t('apps.claim.required');
+              if (Object.keys(errs).length) { global.Ui.showFieldErrors(el, errs); return; }
+              var values = global.Validation.parseTokenList(valuesRaw);
+              try {
+                if (section === 'scope') await global.Api.setOauth2ScopeMap(name, group, values);
+                else if (section === 'sup') await global.Api.setOauth2SupScopeMap(name, group, values);
+                else await global.Api.setOauth2ClaimMap(name, claim, group, values);
+                close();
+                global.Ui.toast(t('common.saved'), 'success');
+                Pages.appDetail(root, name);
+              } catch (err) {
+                if (err && err.status === 400 && err.message) global.Ui.toast(err.message, 'error');
+                else global.Ui.handleError(err, 'oauth2');
+              }
+            });
+          }
+        });
+      }
+      root.addEventListener('click', function (ev) {
+        var tEl = ev.target && ev.target.closest ? ev.target.closest('[data-map-add],[data-map-del],[data-map-edit]') : null;
+        if (!tEl) return;
+        var spec = (tEl.getAttribute('data-map-add') || tEl.getAttribute('data-map-del') || tEl.getAttribute('data-map-edit')).split(':');
+        var section = spec[0], idx = spec.length > 1 ? Number(spec[1]) : null;
+        if (tEl.hasAttribute('data-map-add')) mapDialog(section, null);
+        else if (tEl.hasAttribute('data-map-edit')) mapDialog(section, idx);
+        else if (tEl.hasAttribute('data-map-del') && !tEl.disabled) mapRemove(section, idx);
+      });
+    } catch (err) {
+      global.Ui.handleError(err, 'oauth2');
+    }
+  };
+
+  // ======================================================================
+  // Service accounts — /v1/service_account* incl. API tokens.
+  // Shapes verified against libs/client/src/service_account.rs and
+  // proto/src/{v1/mod.rs, internal/token.rs} (identical 1.10.5 / 1.11.0).
+  // ======================================================================
+  function svcAccountDialog(root) {
+    var body = html`
+      <form data-svc-form novalidate>
+        ${global.Ui.fieldHtml({ name: 'name', label: t('svc.field.name'), required: true, help: t('svc.field.name.help') })}
+        ${global.Ui.fieldHtml({ name: 'displayname', label: t('svc.field.displayName'), required: true })}
+        ${global.Ui.fieldHtml({ name: 'entryManagedBy', label: t('svc.field.managedBy'), required: true, placeholder: 'svc-managers', help: t('svc.field.managedBy.help') })}
+      </form>`;
+    var foot = '<button class="btn" data-cancel>' + esc(t('common.cancel')) + '</button>' +
+      '<button class="btn btn-primary" data-submit>' + esc(t('common.save')) + '</button>';
+    global.Ui.openModal({
+      title: t('svc.create.title'), body: body, footer: foot,
+      onMount: function (el, close) {
+        el.querySelector('[data-cancel]').addEventListener('click', close);
+        el.querySelector('[data-submit]').addEventListener('click', async function () {
+          var form = el.querySelector('[data-svc-form]');
+          var data = {
+            name: form.querySelector('[name=name]').value.trim(),
+            displayname: form.querySelector('[name=displayname]').value.trim(),
+            entryManagedBy: form.querySelector('[name=entryManagedBy]').value.trim()
+          };
+          var result = global.Validation.serviceAccountForm(data);
+          if (!result.ok) { global.Ui.showFieldErrors(el, result.errors); return; }
+          try {
+            await global.Api.createServiceAccount(data);
+            close();
+            global.Ui.toast(t('svc.created'), 'success');
+            Pages.serviceAccounts(root);
+          } catch (err) {
+            if (err && err.status === 400 && err.message) global.Ui.toast(err.message, 'error');
+            else global.Ui.handleError(err, 'svcaccounts');
+          }
+        });
+      }
+    });
+  }
+
+  Pages.serviceAccounts = async function (root) {
+    root.setAttribute('data-page', 'svcaccounts');
+    if (!global.Store.canManageServiceAccounts()) {
+      root.innerHTML = '<h1 class="page-title">' + esc(t('svc.title')) + '</h1>' +
+        card(null, '<p class="muted">' + esc(t('svc.denied')) + '</p>');
+      return;
+    }
+    root.innerHTML = '<h1 class="page-title">' + esc(t('svc.title')) + '</h1>' + global.Ui.spinner();
+    try {
+      var items = (await global.Api.listServiceAccounts()) || [];
+      items.sort(function (a, b) {
+        return (global.Api.attr(a, 'name') || '').localeCompare(global.Api.attr(b, 'name') || '');
+      });
+      var body = '<div class="toolbar"><button class="btn btn-primary" data-new-svc>' + esc(t('svc.new')) + '</button></div>';
+      if (!items.length) {
+        body += card(null, '<p class="muted">' + esc(t('svc.empty')) + '</p>');
+      } else {
+        body += '<div class="table-wrap"><table class="table"><thead><tr>' +
+          '<th>' + esc(t('svc.field.name')) + '</th><th>' + esc(t('svc.field.displayName')) + '</th>' +
+          '<th>' + esc(t('svc.field.managedBy')) + '</th></tr></thead><tbody>';
+        for (var i = 0; i < items.length; i++) {
+          var en = items[i];
+          var nm = global.Api.attr(en, 'name') || global.Api.attr(en, 'uuid') || '';
+          body += '<tr><td><a href="#/svcaccounts/' + encodeURIComponent(nm) + '"><code>' + esc(nm) + '</code></a></td>' +
+            '<td>' + esc(global.Api.attr(en, 'displayname') || '—') + '</td>' +
+            '<td><code>' + esc(global.Api.attr(en, 'entry_managed_by') || '—') + '</code></td></tr>';
+        }
+        body += '</tbody></table></div>';
+      }
+      body += '<p class="muted">' + esc(t('svc.note')) + '</p>';
+      root.innerHTML = '<h1 class="page-title">' + esc(t('svc.title')) + '</h1>' + body;
+      root.querySelector('[data-new-svc]').addEventListener('click', function () { svcAccountDialog(root); });
+    } catch (err) {
+      global.Ui.handleError(err, 'svcaccounts');
+    }
+  };
+
+  Pages.serviceAccountDetail = async function (root, name) {
+    root.setAttribute('data-page', 'svcaccount');
+    root.innerHTML = '<h1 class="page-title">' + esc(t('svc.detail.title')) + '</h1>' + global.Ui.spinner();
+    if (!global.Store.canManageServiceAccounts()) {
+      root.innerHTML = '<h1 class="page-title">' + esc(t('svc.detail.title')) + '</h1>' +
+        card(null, '<p class="muted">' + esc(t('svc.denied')) + '</p>');
+      return;
+    }
+    try {
+      var en = await global.Api.getServiceAccount(name);
+      var tokens = (await global.Api.listApiTokens(name)) || [];
+      var displayname = global.Api.attr(en, 'displayname') || '';
+      var managedBy = global.Api.attr(en, 'entry_managed_by') || '';
+      var uuid = global.Api.attr(en, 'uuid') || '';
+
+      var head = '<div class="toolbar">' +
+        '<button class="btn btn-danger" data-del-svc>' + esc(t('common.delete')) + '</button></div>';
+      var info = '<dl class="detail-list">' +
+        '<dt>' + esc(t('svc.field.name')) + '</dt><dd><code>' + esc(name) + '</code></dd>' +
+        '<dt>' + esc(t('svc.field.displayName')) + '</dt><dd>' + esc(displayname || '—') + '</dd>' +
+        '<dt>' + esc(t('svc.field.managedBy')) + '</dt><dd><code>' + esc(managedBy || '—') + '</code></dd>' +
+        '<dt>' + esc(t('svc.field.uuid')) + '</dt><dd><code class="muted">' + esc(uuid || '—') + '</code></dd>' +
+        '</dl>';
+
+      var tk = '<p class="muted">' + esc(t('svc.tokens.help')) + '</p>';
+      if (!tokens.length) {
+        tk += '<p class="muted">' + esc(t('svc.tokens.empty')) + '</p>';
+      } else {
+        tk += '<div class="table-wrap"><table class="table"><thead><tr><th>' + esc(t('svc.tokens.label')) + '</th>' +
+          '<th>' + esc(t('svc.tokens.scope')) + '</th><th>' + esc(t('svc.tokens.issued')) + '</th>' +
+          '<th>' + esc(t('svc.tokens.expiry')) + '</th><th></th></tr></thead><tbody>';
+        for (var i = 0; i < tokens.length; i++) {
+          var tok = tokens[i] || {};
+          var rw = /write/i.test(String(tok.purpose || '')) || tok.read_write === true;
+          tk += '<tr><td>' + esc(String(tok.label || '—')) + '</td>' +
+            '<td><span class="badge ' + (rw ? 'badge-warn' : 'badge-ok') + '">' + esc(rw ? t('svc.tokens.rw') : t('svc.tokens.ro')) + '</span></td>' +
+            '<td>' + esc(tok.issued_at ? global.Ui.formatDateTime(Number(tok.issued_at) * 1000) : '—') + '</td>' +
+            '<td>' + esc(tok.expiry ? global.Ui.formatDateTime(Number(tok.expiry) * 1000) : t('svc.tokens.never')) + '</td>' +
+            '<td class="row-actions"><button class="btn btn-sm btn-danger" data-token-del="' + esc(String(tok.token_id || '')) + ':' + esc(String(tok.label || '')) + '">' + esc(t('common.delete')) + '</button></td></tr>';
+        }
+        tk += '</tbody></table></div>';
+      }
+      tk += '<p><button class="btn btn-primary" data-token-new>' + esc(t('svc.tokens.new')) + '</button></p>';
+
+      root.innerHTML = '<h1 class="page-title">' + esc(t('svc.detail.title')) + ': <code>' + esc(name) + '</code></h1>' +
+        head + card(null, info) + card(t('svc.tokens'), tk);
+
+      root.querySelector('[data-del-svc]').addEventListener('click', function () {
+        global.Ui.confirmDialog(t('svc.delete.confirm', { name: name }), async function () {
+          await global.Api.deleteServiceAccount(name);
+          global.Ui.toast(t('svc.deleted'), 'success');
+          global.location.hash = '#/svcaccounts';
+        }, { danger: true, confirmLabel: t('common.delete') });
+      });
+      var delTokBtns = root.querySelectorAll('[data-token-del]');
+      for (var dt = 0; dt < delTokBtns.length; dt++) {
+        delTokBtns[dt].addEventListener('click', function () {
+          var parts = this.getAttribute('data-token-del').split(':');
+          var tokenId = parts[0], label = parts.slice(1).join(':');
+          if (!tokenId) return;
+          global.Ui.confirmDialog(t('svc.tokens.delete.confirm', { label: label }), async function () {
+            await global.Api.deleteApiToken(name, tokenId);
+            global.Ui.toast(t('common.deleted'), 'success');
+            Pages.serviceAccountDetail(root, name);
+          }, { danger: true, confirmLabel: t('common.delete') });
+        });
+      }
+      root.querySelector('[data-token-new]').addEventListener('click', function () {
+        var body = html`
+          <form data-token-form novalidate>
+            ${global.Ui.fieldHtml({ name: 'label', label: t('svc.tokens.label'), required: true, placeholder: 'ci-deploy', help: t('svc.tokens.label.help') })}
+            ${global.Ui.fieldHtml({ name: 'expiry', label: t('svc.tokens.expiry'), type: 'date', help: t('svc.tokens.expiry.help') })}
+            <div class="field"><label class="check"><input type="checkbox" name="readWrite" /> ' + esc(t('svc.tokens.rwAsk')) + '</label>
+              <p class="help">' + esc(t('svc.tokens.rwHelp')) + '</p></div>
+            <div class="field"><label class="check"><input type="checkbox" name="compact" /> ' + esc(t('svc.tokens.compact')) + '</label>
+              <p class="help">' + esc(t('svc.tokens.compact.help')) + '</p></div>
+          </form>`;
+        var foot = '<button class="btn" data-cancel>' + esc(t('common.cancel')) + '</button>' +
+          '<button class="btn btn-primary" data-submit>' + esc(t('svc.tokens.issue')) + '</button>';
+        global.Ui.openModal({
+          title: t('svc.tokens.new'), body: body, footer: foot,
+          onMount: function (el, close) {
+            el.querySelector('[data-cancel]').addEventListener('click', close);
+            el.querySelector('[data-submit]').addEventListener('click', async function () {
+              var form = el.querySelector('[data-token-form]');
+              var data = {
+                label: form.querySelector('[name=label]').value.trim(),
+                expiry: form.querySelector('[name=expiry]').value,
+                readWrite: form.querySelector('[name=readWrite]').checked,
+                compact: form.querySelector('[name=compact]').checked
+              };
+              var result = global.Validation.apiTokenForm(data);
+              if (!result.ok) { global.Ui.showFieldErrors(el, result.errors); return; }
+              var expirySecs = data.expiry
+                ? Math.floor((new Date(data.expiry + 'T23:59:59').getTime()) / 1000) : null;
+              try {
+                var fullToken = await global.Api.generateApiToken(name, {
+                  label: data.label, expiry: expirySecs,
+                  readWrite: data.readWrite, compact: data.compact
+                });
+                close();
+                var tok = String(fullToken || '');
+                var shown = tok
+                  ? '<p><strong>' + esc(t('svc.tokens.once')) + '</strong></p>' +
+                    '<p><code class="break-all">' + esc(tok) + '</code></p>' +
+                    '<button class="btn" data-copy-token>' + esc(t('common.copy')) + '</button>' +
+                    (qrSvg(tok) ? '<p class="muted">' + esc(t('svc.tokens.scan')) + '</p><div class="qr-box">' + qrSvg(tok) + '</div>' : '')
+                  : '<p class="error-text">' + esc(t('svc.tokens.emptyResponse')) + '</p>';
+                var m = global.Ui.openModal({ title: t('svc.tokens.issued'), body: shown, wide: true, sticky: true });
+                var cb = m.el.querySelector('[data-copy-token]');
+                if (cb) cb.addEventListener('click', function () { global.Ui.copyText(tok); });
+                Pages.serviceAccountDetail(root, name);
+              } catch (err) {
+                if (err && err.status === 400 && err.message) global.Ui.toast(err.message, 'error');
+                else global.Ui.handleError(err, 'svcaccounts');
+              }
+            });
+          }
+        });
+      });
+    } catch (err) {
+      global.Ui.handleError(err, 'svcaccounts');
+    }
+  };
+
+  // ======================================================================
   // Recycle bin (GET /v1/recycle_bin, POST /v1/recycle_bin/{uuid}/_revive
   // — the only recycle endpoints Kanidm 1.10 has; see v1.rs routes. There
   // is no purge endpoint: the server purges recycled entries on schedule.)
@@ -1247,6 +1853,19 @@
       return '<option value="' + v + '"' + (cfg.theme === v ? ' selected' : '') + '>' + esc(t('settings.theme.' + v)) + '</option>';
     }).join('');
 
+    // Live server compatibility (populated from X-KANIDM-VERSION once any
+    // API call has happened; refreshed after the connection test too).
+    var compat = global.Store.serverCompat();
+    var compatBadge =
+      compat === 'supported' ? '<span class="badge badge-ok">' + esc(t('settings.compat.supported')) + '</span>' :
+      compat === 'unsupported' ? '<span class="badge badge-warn">' + esc(t('settings.compat.unsupported')) + '</span>' :
+      '<span class="badge">' + esc(t('settings.compat.unknown')) + '</span>';
+    var serverRow = '<div class="field" data-server-version-row><label class="label">' +
+      esc(t('settings.serverVersion')) + '</label><div>' +
+      '<code data-server-version>' + esc(global.Store.serverVersion || '—') + '</code> ' + compatBadge +
+      '<p class="help">' + esc(t('settings.serverVersion.help')) + ' ' +
+      esc(global.Store.SUPPORTED_KANIDM_LABEL) + '</p></div></div>';
+
     var body = html`
       <form data-settings-form novalidate>
         ${global.Ui.fieldHtml({ name: 'apiUrl', label: t('settings.api'), value: cfg.apiUrl || '', required: true, help: 'Override at runtime with ?apiUrl=' })}
@@ -1262,7 +1881,7 @@
       </form>`;
 
     root.innerHTML = '<h1 class="page-title">' + esc(t('settings.title')) + '</h1>' +
-      card(null, body +
+      card(null, body + serverRow +
         '<div class="btn-row">' +
         '<button class="btn btn-primary" data-settings-save>' + esc(t('common.save')) + '</button>' +
         '<button class="btn" data-settings-test>' + esc(t('settings.test')) + '</button>' +
@@ -1324,6 +1943,22 @@
         }
         if (!res.ok) throw new Error('HTTP ' + res.status);
         var discovery = await res.json();
+        // The version middleware stamps every response; refresh the
+        // compatibility row with the freshest value.
+        var kv2 = res.headers && typeof res.headers.get === 'function' ?
+          res.headers.get('x-kanidm-version') : null;
+        if (kv2) {
+          global.Store.setServerVersion(kv2);
+          var vrow = root.querySelector('[data-server-version]');
+          if (vrow) vrow.textContent = global.Store.serverVersion;
+          var vbadge = root.querySelector('[data-server-version-row] .badge');
+          if (vbadge) {
+            var c2 = global.Store.serverCompat();
+            vbadge.textContent = t('settings.compat.' + c2);
+            vbadge.className = 'badge ' + (c2 === 'supported' ? 'badge-ok' :
+              c2 === 'unsupported' ? 'badge-warn' : '');
+          }
+        }
         slot.innerHTML = '<p class="ok-text">' + esc(t('settings.test.ok')) +
           '</p><p class="muted">issuer: <code>' + esc(String(discovery.issuer || '—')) + '</code></p>';
       } catch (err) {

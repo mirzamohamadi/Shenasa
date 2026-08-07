@@ -171,6 +171,8 @@
       case 403: {
         var msg = context === 'people' ? t('error.403.people')
           : context === 'groups' ? t('error.403.groups')
+          : context === 'oauth2' ? t('error.403.oauth2')
+          : context === 'svcaccounts' ? t('error.403.svcaccounts')
           : t('error.403');
         // A read-only (privilege-capable, not yet stepped-up) session is
         // denied EVERY write before roles are checked — if that's our

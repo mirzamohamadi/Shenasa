@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-test:
+    name: Lint + unit/smoke tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+
+  docker-build:
+    name: UI container image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - run: docker build -f deploy/Dockerfile.ui -t shenasa-ui:ci .
+      - name: Image contains only static assets
+        run: |
+          docker run --rm shenasa-ui:ci sh -c 'ls /srv/shenasa/index.html /srv/shenasa/css/styles.css /srv/shenasa/js'
+
+  integration:
+    name: Integration (real Kanidm)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: sh test/integration.sh
+
+  security-audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # The runtime UI ships zero dependencies; jsdom is the only dev one.
+      - run: npm audit --audit-level=high
+      # Guard rails: no secrets in the public browser config, and nothing in
+      # deploy/ may disable TLS verification.
+      - name: No secrets in public config / no TLS bypass
+        run: |
+          ! grep -rinE 'client_secret|private_key|api[_-]?key' js/config.js
+          ! grep -rnE 'tls_insecure_skip_verify\s*=\s*true' deploy/
