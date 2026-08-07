@@ -915,6 +915,28 @@ async function main() {
     assert(scripts.indexOf('pages.js') < scripts.indexOf('app.js'), 'pages before app');
   });
 
+  await test('CI: shell scripts run under bash; integration image pinned', () => {
+    // Ubuntu's sh is dash and aborts on `set -o pipefail` — bash-only
+    // scripts must be invoked with bash explicitly (this exact bug kept
+    // the real integration suite from ever executing before v1.1.0;
+    // observed on the first GitHub CI run: "Illegal option -o pipefail").
+    const ci = readFile('.github/workflows/ci.yml');
+    assert(!/run:\s*sh\s+\S+\.sh/.test(ci), 'CI never invokes .sh scripts via sh (dash)');
+    assertIncludes(ci, 'bash test/integration.sh', 'CI runs the integration suite via bash');
+    const it = readFile('test/integration.sh');
+    assertIncludes(it, '#!/usr/bin/env bash', 'integration.sh declares bash');
+    assertIncludes(it, 'set -euo pipefail', 'integration.sh uses pipefail (bash-only)');
+    const img = it.match(/SHENASA_IT_IMAGE:-kanidm\/server:([^}\s]+)\}/);
+    assert(img, 'integration.sh exposes a default Kanidm image');
+    assert(/^\d+\.\d+\.\d+$/.test(img[1]), `integration default image is a pinned release (${img[1]}), never :latest`);
+    // Create envelope verified against libs/client/src/oauth.rs — attrs are
+    // name/displayname/oauth2_rs_origin_landing; the internal class attr
+    // (oauth2_rs_name) is rejected by the schema on create. Match the
+    // attribute-usage shape only (comments above may name it in prose).
+    assert(!/oauth2_rs_name\s*:/.test(it), 'integration.sh must not send oauth2_rs_name on create');
+    assertIncludes(it, '_scopemap/', 'integration.sh grants scopes via the dedicated endpoint');
+  });
+
   await test('privacy: no private deployment identifiers in shipped sources', () => {
     // Nothing in the public repo may name a real deployment (internal
     // domains, hostnames); shipped defaults use *.example.com placeholders.

@@ -39,7 +39,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - run: sh test/integration.sh
+      # bash, not sh: Ubuntu's sh is dash and aborts on `set -o pipefail`.
+      - run: bash test/integration.sh
 
   security-audit:
     name: Dependency audit

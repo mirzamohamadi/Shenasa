@@ -33,7 +33,7 @@ source tree of the target release — routes
 
 ## v1.1 — "Applications & service accounts" (shipped)
 
-✅ **Status: released as v1.1.0 (2026-08-06) — the first public release.**
+✅ **Status: released as v1.1.0 (2026-08-06).**
 Apps page, service accounts + API tokens, the domain card and the deploy
 downgrade guard all landed (see CHANGELOG `[1.1.0]`); the CI server matrix
 and release automation below remain open for a patch/minor follow-up.

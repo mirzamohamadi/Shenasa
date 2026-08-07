@@ -12,7 +12,7 @@ set -euo pipefail
 
 NAME=${SHENASA_IT_CONTAINER:-shenasa-it-kanidm}
 PORT=${SHENASA_IT_PORT:-18443}
-IMAGE=${SHENASA_IT_IMAGE:-kanidm/server:latest}
+IMAGE=${SHENASA_IT_IMAGE:-kanidm/server:1.11.0}   # pinned — never the drifting :latest dev channel
 ORIGIN="https://localhost:$PORT"
 WORK=$(mktemp -d)
 
@@ -144,19 +144,30 @@ log "RBAC grant verified."
 # --- 6. OAuth2 client + discovery (the Shenasa SSO prerequisites) -----------------
 CLIENT=it_shenasa_client
 log "creating public OAuth2 client $CLIENT…"
+# Create envelope verified against libs/client/src/oauth.rs
+# (idm_oauth2_rs_public_create): name + displayname +
+# oauth2_rs_origin_landing + oauth2_strict_redirect_uri — the internal
+# "oauth2 rs name" class attr is NOT accepted on create.
 STATUS=$(curl -sS --cacert "$WORK/ca.pem" -o "$WORK/client.json" -w '%{http_code}' \
   -H "Authorization: Bearer $TOKEN" -c "$JAR" -b "$JAR" \
   -H 'Content-Type: application/json' -H 'Accept: application/json' \
   -X POST "$ORIGIN/v1/oauth2/_public" -d "$(jq -nc --arg id "$CLIENT" \
-  '{attrs:{oauth2_rs_name:[$id], displayname:["IT Shenasa"]}}')")
+  '{attrs:{name:[$id], displayname:["IT Shenasa"],
+           oauth2_rs_origin_landing:["https://localhost/"],
+           oauth2_strict_redirect_uri:["true"]}}')")
 if [ "$STATUS" != "200" ] && [ "$STATUS" != "201" ]; then
   cat "$WORK/client.json" >&2 || true
   die "public OAuth2 client create failed (HTTP $STATUS)"
 fi
 api PATCH "/v1/oauth2/$CLIENT" "$(jq -nc \
-  '{attrs:{oauth2_rs_origin_landing:["https://localhost/"], oauth2_rs_origin:["https://localhost"],
-           oauth2_rs_scope_map:["idm_service_desk@localhost:openid,profile,email,groups"]}}')" >/dev/null \
-  || die "client configure failed"
+  '{attrs:{oauth2_rs_origin:["https://localhost"]}}')" >/dev/null \
+  || die "client origin configure failed"
+# Scope maps go through the dedicated endpoint (bare JSON array of scope
+# strings) — writing the raw serialized oauth2_rs_scope_map attr is not a
+# supported client path.
+api POST "/v1/oauth2/$CLIENT/_scopemap/idm_service_desk@localhost" \
+  '["openid","profile","email","groups"]' >/dev/null \
+  || die "scope map grant failed"
 
 log "checking OIDC discovery at the origin root (never /v1)…"
 DOC=$(curl -fsS --cacert "$WORK/ca.pem" "$ORIGIN/oauth2/openid/$CLIENT/.well-known/openid-configuration") \

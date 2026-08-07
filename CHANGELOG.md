@@ -4,11 +4,13 @@ All notable changes to Shenasa are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## [1.1.0] - 2026-08-06
+## [1.1.0] - 2026-08-07
 
-**First public release.** v1.0.0 was the internal baseline milestone (never
-tagged publicly); the first public tag is `v1.1.0`, containing the whole
-v1.0.0 baseline below plus everything in this section.
+**v1.1.0 — "Applications & service accounts"** (`docs/ROADMAP.md`). A
+drop-in upgrade for v1.0.0 deployments: replace the files, keep the
+compose pin matching the Kanidm version your server already runs, and
+re-run `deploy/setup.sh` (it re-stages the SPA and refuses accidental
+server downgrades).
 
 ### Added
 
@@ -78,6 +80,20 @@ v1.0.0 baseline below plus everything in this section.
 
 ### Fixed
 
+- **CI integration suite had never executed** (broken since v1.0.0;
+  surfaced on the first v1.1.0 GitHub Actions run): the workflow invoked
+  `sh test/integration.sh` and Ubuntu's `sh` is dash, which aborts
+  instantly on the script's `set -o pipefail` (`Illegal option`). The
+  workflow now runs it under bash explicitly. Reviewing the never-run
+  script against the v1.11.0 tree surfaced three more latent bugs, all
+  fixed: the default image pinned to `kanidm/server:1.11.0` instead of the
+  drifting `:latest` dev channel; the OAuth2 client create used the stale
+  internal schema attr `oauth2_rs_name` instead of the verified
+  `name`/`displayname`/`oauth2_rs_origin_landing` envelope
+  (`libs/client/src/oauth.rs: idm_oauth2_rs_public_create`); and the scope
+  grant now uses the dedicated `_scopemap/{group}` endpoint (bare JSON
+  array) instead of writing the raw serialized attribute. Regression
+  tests cover all four (`test/smoke.test.js`, CI block).
 - **Wrong builtin role name in docs and UI copy**: the OAuth2-admin
   builtin group is `idm_oauth2_admins`, not the (nonexistent)
   `idm_oauth2_client_admins` — verified against the dl14/dl15
@@ -396,5 +412,5 @@ Initial development snapshot (pre-public; never tagged).
   OpenAPI reference, go-live checklist, MIT license.
 
 [Unreleased]: https://github.com/mirzamohamadi/shenasa/compare/v1.1.0...HEAD
-[1.1.0]: https://github.com/mirzamohamadi/shenasa/releases/tag/v1.1.0
-[1.0.0]: https://github.com/mirzamohamadi/shenasa/blob/main/CHANGELOG.md#100---2026-08-06
+[1.1.0]: https://github.com/mirzamohamadi/shenasa/compare/v1.0.0...v1.1.0
+[1.0.0]: https://github.com/mirzamohamadi/shenasa/releases/tag/v1.0.0
