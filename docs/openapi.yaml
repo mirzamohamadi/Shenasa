@@ -241,7 +241,7 @@ paths:
           content: { application/json: { schema: { $ref: "#/components/schemas/Entry" } } }
     patch:
       tags: [groups]
-      summary: Update a group (displayname, entry_managed_by, ...)
+      summary: Update a group (description, entry_managed_by, …)
       security: [{ bearerAuth: [] }]
       parameters: [{ $ref: "#/components/parameters/entryId" }]
       requestBody:

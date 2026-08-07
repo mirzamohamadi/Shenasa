@@ -102,7 +102,6 @@
     groupForm: function (data, opts) {
       opts = opts || {};
       var rules = {
-        displayname: displayName,
         description: function (v) {
           // Optional free text (Kanidm Description attribute).
           if (v == null || v === '') return res(true);

@@ -80,6 +80,19 @@ server downgrades).
 
 ### Fixed
 
+- **Group create/edit sent an ACP-illegal attribute — a REAL 403 against
+  live servers**, caught by the first-ever CI integration run
+  (kanidm/server:1.11.0): Kanidm groups have no writable displayname.
+  dl14/dl15 `idm_acp_group_manage` allows create/modify of
+  Name/Description/Mail/Member/EntryManagedBy only, and the delegation ACP
+  `idm_acp_group_entry_manager` allows Description/Member only, so every
+  `POST /v1/group` carrying `displayname` was rejected for group admins.
+  Shenasa's group flows no longer send or offer a display name anywhere:
+  create/edit payload, form field, list column and detail row removed,
+  validator/OpenAPI aligned, the CI integration suite mirrors the fixed
+  payload exactly, and a wiring test fails if displayname ever re-enters
+  a group payload. Persons' display names are unaffected (their ACPs do
+  allow DisplayName).
 - **CI integration suite had never executed** (broken since v1.0.0;
   surfaced on the first v1.1.0 GitHub Actions run): the workflow invoked
   `sh test/integration.sh` and Ubuntu's `sh` is dash, which aborts

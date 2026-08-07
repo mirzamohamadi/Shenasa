@@ -743,7 +743,6 @@
           return '<a class="link" href="#/groups/' + encodeURIComponent(name) + '">' + esc(name) + '</a>';
         }
       },
-      { key: 'displayname', label: t('groups.col.displayName'), render: function (g) { return esc(global.Api.attr(g, 'displayname') || ''); } },
       {
         key: 'capabilities', label: t('groups.col.capabilities'), render: function (g) {
           var cap = groupCapability(g);
@@ -813,7 +812,6 @@
     var body = html`
       <form data-group-form novalidate>
         ${global.Ui.fieldHtml({ name: 'name', label: t('groups.col.name'), value: name, required: true, readonly: isEdit })}
-        ${global.Ui.fieldHtml({ name: 'displayname', label: t('groups.col.displayName'), value: isEdit ? global.Api.attr(group, 'displayname') || '' : '', required: true })}
         ${global.Ui.fieldHtml({ name: 'description', label: t('groups.field.description'), value: isEdit ? global.Api.attr(group, 'description') || '' : '', help: t('groups.field.description.help') })}
         ${canManagedBy || !isEdit ? global.Ui.fieldHtml({ name: 'entryManagedBy', label: t('groups.col.managedBy'), value: isEdit ? global.Store.stripDomain(global.Api.attr(group, 'entry_managed_by') || '') : '', help: canManagedBy ? '' : 'Only access-control admins can change this.' }) : ''}
       </form>`;
@@ -830,7 +828,6 @@
           var managedByInput = form.querySelector('[name=entryManagedBy]');
           var data = {
             name: form.querySelector('[name=name]').value.trim(),
-            displayname: form.querySelector('[name=displayname]').value.trim(),
             description: form.querySelector('[name=description]').value.trim(),
             entryManagedBy: managedByInput ? managedByInput.value.trim() : ''
           };
@@ -841,7 +838,7 @@
           }
           try {
             if (isEdit) {
-              var payload = { displayname: data.displayname };
+              var payload = {};
               if (data.description) payload.description = data.description;
               if (canManagedBy && data.entryManagedBy) payload.entryManagedBy = data.entryManagedBy;
               await global.Api.updateGroup(name, payload);
@@ -880,7 +877,6 @@
 
   function renderGroupDetail(root, group, people, allGroups) {
     var name = global.Api.attr(group, 'name') || '';
-    var displayname = global.Api.attr(group, 'displayname') || '';
     var members = global.Api.attrs(group, 'member');
     var managedBy = global.Store.stripDomain(global.Api.attr(group, 'entry_managed_by') || '');
     var canManage = global.Store.canManageGroups();
@@ -949,7 +945,6 @@
     var capability = groupCapability(group);
 
     var infoCard = card(null, html`
-      <div class="kv"><span class="kv-k">${esc(t('group.detail.displayName'))}</span><span class="kv-v">${esc(displayname)}</span></div>
       <div class="kv"><span class="kv-k">${esc(t('group.detail.description'))}</span><span class="kv-v">${esc(global.Api.attr(group, 'description') || '—')}</span></div>
       ${capability ? '<div class="kv"><span class="kv-k">' + esc(t('group.detail.capabilities')) + '</span><span class="kv-v">' + esc(capability) + '</span></div>' : ''}
       <div class="kv"><span class="kv-k">${esc(t('group.detail.managedBy'))}</span><span class="kv-v">${esc(managedBy || '—')}</span></div>

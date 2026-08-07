@@ -155,9 +155,9 @@ async function main() {
     assert(!env.Validation.username('Alice').ok, 'uppercase rejected (server lowercases)');
     assert(!env.Validation.username('root').ok, 'reserved name rejected');
     assert(!env.Validation.username('m.m ir').ok, 'spaces rejected');
-    const g = env.Validation.groupForm({ name: 'team.one', displayname: 'Team One', description: 'ok' });
+    const g = env.Validation.groupForm({ name: 'team.one', description: 'ok' });
     assert(g.ok, 'dotted group name accepted');
-    const tooLong = env.Validation.groupForm({ name: 'team', displayname: 'T', description: 'x'.repeat(300) });
+    const tooLong = env.Validation.groupForm({ name: 'team', description: 'x'.repeat(300) });
     assert(!tooLong.ok && tooLong.errors.description, 'description length capped');
   });
 
@@ -786,6 +786,34 @@ async function main() {
     assert(at('GET', '/domain'), 'GET /v1/domain');
   });
 
+  await test('API client: group payloads never send displayname (ACP-illegal on groups)', async () => {
+    // Groups have no writable displayname upstream: dl14/dl15
+    // idm_acp_group_manage create/modify attrs = Name/Description/Mail/
+    // Member/EntryManagedBy (no DisplayName) and the delegation ACP
+    // idm_acp_group_entry_manager allows Description/Member only — sending
+    // it was a guaranteed 403 for group admins (caught by the first real
+    // CI integration run on kanidm/server:1.11.0).
+    const calls = [];
+    const w = loadModules({
+      fetch: async (url, init) => {
+        calls.push({ url, method: init.method, body: init.body });
+        return { ok: true, status: 200, headers: { get: () => null }, text: async () => '{}' };
+      }
+    });
+    w.Store.user = { token: 'x' };
+    w.SHENASA_CONFIG.apiUrl = 'https://idm.example.test/v1';
+    await w.Api.createGroup({ name: 'team', displayname: 'Team', description: 'd', entryManagedBy: 'staff' });
+    await w.Api.updateGroup('team', { displayname: 'T2', description: 'd2' });
+    const cAttrs = JSON.parse(calls[0].body).attrs;
+    assert(calls[0].url === 'https://idm.example.test/v1/group', 'group create URL');
+    assert(Array.isArray(cAttrs.name) && cAttrs.name[0] === 'team', 'group create sends name');
+    assert(!('displayname' in cAttrs), 'group create MUST NOT send displayname (403 upstream)');
+    assert(cAttrs.description && cAttrs.description[0] === 'd', 'group create description');
+    const uAttrs = JSON.parse(calls[1].body).attrs;
+    assert(!('displayname' in uAttrs), 'group update MUST NOT send displayname (403 upstream)');
+    assert(uAttrs.description && uAttrs.description[0] === 'd2', 'group update description');
+  });
+
   await test('RBAC: oauth2 + service-account role gates', () => {
     const w = loadModules({});
     w.Store.setUser({ name: 'a', roles: ['idm_oauth2_admins'], token: 'x', authMethod: 'sso' });
@@ -987,9 +1015,9 @@ async function main() {
       { attrs: { name: ['dave'], displayname: ['=cmd|/c calc'], mail: ['dave@example.test'], uuid: ['u4'] } }
     ];
     const fakeGroups = [
-      { attrs: { name: ['idm_admins'], displayname: ['Admins'], member: ['alice@idm.example.test'] } },
-      { attrs: { name: ['staff'], displayname: ['Staff'], description: ['Staff team group'], member: ['alice@idm.example.test', 'bob@idm.example.test', 'team@idm.example.test'], entry_managed_by: ['idm_access_control_admins@idm.example.test'] } },
-      { attrs: { name: ['team'], displayname: ['Team'], member: ['carol@idm.example.test'] } }
+      { attrs: { name: ['idm_admins'], member: ['alice@idm.example.test'] } },
+      { attrs: { name: ['staff'], description: ['Staff team group'], member: ['alice@idm.example.test', 'bob@idm.example.test', 'team@idm.example.test'], entry_managed_by: ['idm_access_control_admins@idm.example.test'] } },
+      { attrs: { name: ['team'], member: ['carol@idm.example.test'] } }
     ];
     const fakeRecycled = [
       { attrs: { name: ['old-bob'], uuid: ['11111111-2222-3333-4444-555555555555'], class: ['person', 'account', 'recycled', 'object'] } },

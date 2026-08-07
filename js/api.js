@@ -140,14 +140,18 @@
     listGroups: function () { return Api._request('GET', '/group'); },
     getGroup: function (name) { return Api._request('GET', '/group/' + enc(name)); },
     createGroup: function (data) {
-      var attrs = { name: data.name, displayname: data.displayname };
+      // Groups have NO writable displayname in Kanidm: dl14/dl15
+      // idm_acp_group_manage create_attrs = Class/Name/Uuid/Description/
+      // Mail/Member/EntryManagedBy (no DisplayName), the delegation ACP
+      // idm_acp_group_entry_manager allows Description/Member only.
+      // Sending displayname is a guaranteed 403 on a real server.
+      var attrs = { name: data.name };
       if (data.description) attrs.description = data.description;
       if (data.entryManagedBy) attrs.entry_managed_by = data.entryManagedBy;
       return Api._request('POST', '/group', Api._entry(attrs));
     },
     updateGroup: function (name, data) {
       var attrs = {};
-      if (data.displayname !== undefined) attrs.displayname = data.displayname;
       if (data.description !== undefined) attrs.description = data.description;
       if (data.entryManagedBy !== undefined) attrs.entry_managed_by = data.entryManagedBy;
       return Api._request('PATCH', '/group/' + enc(name), Api._entry(attrs));

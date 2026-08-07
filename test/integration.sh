@@ -120,7 +120,9 @@ api GET "/v1/person/$PERSON" | jq -e --arg n "$PERSON" '.attrs.name[0] == $n' >/
 log "person verified."
 
 log "creating group $GROUP…"
-api POST /v1/group "$(jq -nc --arg n "$GROUP" '{attrs:{name:[$n], displayname:["IT Group"]}}')" >/dev/null \
+# Groups have no writable displayname (dl14/dl15 idm_acp_group_manage
+# create attrs); this payload mirrors exactly what the Shenasa UI sends.
+api POST /v1/group "$(jq -nc --arg n "$GROUP" '{attrs:{name:[$n]}}')" >/dev/null \
   || die "create group failed"
 
 log "adding membership ($PERSON in $GROUP)…"
