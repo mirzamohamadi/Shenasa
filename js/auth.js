@@ -144,10 +144,13 @@
     },
 
     startSsoLogin: async function () {
+      var cfg = global.ShenaConfig;
+      if (!cfg.isSafeHttpUrl(cfg.oauthBase()) || !cfg.isSafeHttpUrl(cfg.redirectUri())) {
+        throw new Error('API URL and redirect URI must be https (http://localhost is allowed).');
+      }
       if (!Auth.pkceSupported()) {
         throw new Error('PKCE requires Web Crypto (crypto.subtle) — use a modern browser over HTTPS.');
       }
-      var cfg = global.ShenaConfig;
       var verifier = randomB64Url(64);
       var challenge = await sha256B64Url(verifier);
       var state = randomB64Url(24);
@@ -530,7 +533,9 @@
     signOut: async function () {
       global.Store.clear();
       var base = global.ShenaConfig.oauthBase();
-      if (!base) return { serverLogout: false, logoutUrl: null };
+      if (!base || !global.ShenaConfig.isSafeHttpUrl(base)) {
+        return { serverLogout: false, logoutUrl: null };
+      }
       var logoutUrl = base + '/ui/logout';
       // Origin comparison without the URL constructor (simple parse of
       // scheme://authority) — robust in any JS environment.

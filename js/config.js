@@ -34,13 +34,30 @@
     theme: 'light',
     // Minutes of inactivity before an automatic sign-out. 0 = disabled
     // (the browser may keep the session until logout/server expiry).
-    idleTimeoutMin: 0
+    idleTimeoutMin: 0,
+    // Optional community language pack code (BCP-47-ish, e.g. 'de', 'fa').
+    // '' or 'en' = English core, no pack fetch. See js/i18n.js / locales/.
+    locale: ''
   };
 
   var ALLOWED_KEYS = [
-    'apiUrl', 'oidcClientId', 'oidcScope', 'oidcRedirectUri', 'theme', 'idleTimeoutMin'
+    'apiUrl', 'oidcClientId', 'oidcScope', 'oidcRedirectUri', 'theme', 'idleTimeoutMin', 'locale'
   ];
   var STORAGE_KEY = 'shenasa.config';
+
+  // Absolute http(s) URL that is safe to assign to location / <a href>.
+  // https is always allowed; plain http is only allowed to loopback so a
+  // crafted ?apiUrl=javascript:… or data:… cannot become an XSS sink, and
+  // a remote http:// IdP cannot be injected over a TLS-served UI.
+  function isSafeHttpUrl(v) {
+    if (typeof v !== 'string') return false;
+    var s = v.trim();
+    if (!s || /\s/.test(s)) return false;
+    if (/^https:\/\/[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?(\/[^\s]*)?$/i.test(s)) {
+      return true;
+    }
+    return /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:[0-9]{1,5})?(\/[^\s]*)?$/i.test(s);
+  }
 
   function parseQuery(search) {
     var out = {};
@@ -51,8 +68,13 @@
     for (var i = 0; i < pairs.length; i++) {
       if (!pairs[i]) continue;
       var kv = pairs[i].split('=');
-      var key = decodeURIComponent(kv[0] || '');
-      var val = decodeURIComponent((kv[1] || '').replace(/\+/g, ' '));
+      var key, val;
+      try {
+        key = decodeURIComponent(kv[0] || '');
+        val = decodeURIComponent((kv[1] || '').replace(/\+/g, ' '));
+      } catch (e) {
+        continue; // malformed % sequences must not crash boot()
+      }
       out[key] = val;
     }
     return out;
@@ -68,6 +90,16 @@
     if (out.theme && out.theme !== 'light' && out.theme !== 'dark' && out.theme !== 'auto') {
       delete out.theme;
     }
+    // Locale codes are constrained to a strict shape so a config value can
+    // never become a path-traversal or URL for the pack fetch.
+    if (out.locale && !/^[a-zA-Z]{2,3}(-[a-zA-Z0-9]{2,8})*$/.test(out.locale)) {
+      delete out.locale;
+    }
+    // Drop javascript:/data:/file: (and any non-http(s)) before they can
+    // reach location.assign or an href. Unknown / malformed values fall
+    // back to the shipped defaults.
+    if (out.apiUrl && !isSafeHttpUrl(out.apiUrl)) delete out.apiUrl;
+    if (out.oidcRedirectUri && !isSafeHttpUrl(out.oidcRedirectUri)) delete out.oidcRedirectUri;
     return out;
   }
 
@@ -114,6 +146,7 @@
     parseQuery: parseQuery,
     resolve: resolve,
     oauthBaseOf: oauthBaseOf,
+    isSafeHttpUrl: isSafeHttpUrl,
 
     // Load the effective config for this page load.
     load: function (searchString) {
@@ -142,6 +175,7 @@
     scope: function () { return global.SHENASA_CONFIG.oidcScope; },
     redirectUri: function () { return global.SHENASA_CONFIG.oidcRedirectUri; },
     theme: function () { return global.SHENASA_CONFIG.theme || 'light'; },
+    locale: function () { return global.SHENASA_CONFIG.locale || ''; },
     // Idle sign-out in whole minutes (0 = disabled). Clamped to sane bounds.
     idleTimeoutMin: function () {
       var v = parseFloat(global.SHENASA_CONFIG.idleTimeoutMin, 10);

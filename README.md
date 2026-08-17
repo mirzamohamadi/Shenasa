@@ -1,6 +1,6 @@
 # Shenasa — Admin UI for Kanidm
 
-[![Release](https://img.shields.io/badge/release-v1.1.0-blue)](https://github.com/mirzamohamadi/shenasa/releases)
+[![Release](https://img.shields.io/badge/release-v1.3.0-blue)](https://github.com/mirzamohamadi/shenasa/releases)
 [![Kanidm compatibility](https://img.shields.io/badge/Kanidm-1.10.x%20%7C%201.11.x-blueviolet)](#compatibility)
 [![CI](https://github.com/mirzamohamadi/shenasa/actions/workflows/ci.yml/badge.svg)](https://github.com/mirzamohamadi/shenasa/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -9,8 +9,8 @@ Shenasa is a modern, dependency-free **administration UI for the
 [Kanidm](https://kanidm.com) identity management server**. It is *not* a
 standalone identity provider: the real identity engine is Kanidm. Shenasa
 gives administrators a clean web UI to manage users, groups, memberships,
-passkeys, invitations, sessions, and view analytics — instead of using the
-`kanidm` CLI for everything.
+passkeys, OAuth2/OIDC apps, service accounts, reports and sessions —
+instead of using the `kanidm` CLI for everything.
 
 The UI is a **static single-page application (SPA)** written in plain
 HTML/CSS/vanilla JS: no frameworks, no build step, no runtime npm packages,
@@ -29,7 +29,7 @@ Kanidm server** through its REST/OIDC/WebAuthn endpoints.
 
 ## Compatibility
 
-**Shenasa v1.1.0 supports Kanidm server `1.10.x` and `1.11.x`** — verified
+**Shenasa v1.3.0 supports Kanidm server `1.10.x` and `1.11.x`** — verified
 by diffing the v1.10.5 and v1.11.0 source trees. The deploy layer pins
 `kanidm/server:1.11.0` by default; `1.10.5` is the verified alternative (see
 `deploy/README.md` "Running Kanidm 1.11"). `deploy/setup.sh` refuses to ever
@@ -38,10 +38,10 @@ Kanidm migrations are one-way.
 
 | Shenasa | Kanidm server | Status |
 | --- | --- | --- |
-| **v1.1.0** | **1.10.x** (recommended **1.10.5**) | ✅ Supported — every endpoint, auth flow, builtin ACP and error path the UI touches is source-verified against the Kanidm **v1.10.5** tree (file/line evidence in `docs/security-audit-1.0.0.md` and the CHANGELOG) |
-| **v1.1.0** | **1.11.x** (verified **1.11.0**) | ✅ Supported — the `/v1` route sets of 1.10.5 and 1.11.0 are **identical** (100/100 routes); dl15 builtin ACPs are additive-only vs dl14 (self-read attribute widening, OAuth2 introspection attributes) so the role/tier mapping is unchanged; auth scope semantics, the 600 s write window and the 7-day recycle retention are the same constants |
-| v1.1.0 | ≤ 1.9.x | ❌ Unsupported — earlier servers lack parts of the 1.10 REST/auth surface this UI relies on (stepped `/v1/auth` passkey flow, `/v1/reauth` write-unlock semantics) |
-| v1.1.0 | ≥ 1.12.x | ⚠️ Unverified — dev series; use *at your own risk* until a Shenasa release states support |
+| **v1.3.0** | **1.10.x** (recommended **1.10.5**) | ✅ Supported — every endpoint, auth flow, builtin ACP and error path the UI touches is source-verified against the Kanidm **v1.10.5** tree (file/line evidence in `docs/security-audit-1.0.0.md` and the CHANGELOG) |
+| **v1.3.0** | **1.11.x** (verified **1.11.0**) | ✅ Supported — the `/v1` route sets of 1.10.5 and 1.11.0 are **identical** (100/100 routes); dl15 builtin ACPs are additive-only vs dl14 (self-read attribute widening, OAuth2 introspection attributes) so the role/tier mapping is unchanged; auth scope semantics, the 600 s write window and the 7-day recycle retention are the same constants |
+| v1.3.0 | ≤ 1.9.x | ❌ Unsupported — earlier servers lack parts of the 1.10 REST/auth surface this UI relies on (stepped `/v1/auth` passkey flow, `/v1/reauth` write-unlock semantics) |
+| v1.3.0 | ≥ 1.12.x | ⚠️ Unverified — dev series; use *at your own risk* until a Shenasa release states support |
 
 Notes:
 
@@ -69,22 +69,39 @@ Notes:
   expose audit events over REST).
 - **Users**: search, group filter, pagination; create/edit/soft-delete;
   valid-from/expiry; PII gating; CSV import + CSV/JSON export.
+  **Bulk actions** (v1.3): multi-select rows, dry-run-first *add-to-group*
+  (one batched request) and *set/clear expiry* (per-user preview;
+  clear = attribute purge). **Onboarding wizard**: person → baseline
+  groups → first-sign-in link with QR.
+- **Reports** (v1.3, `idm_people_admins`): accounts expiring within N days
+  (+ CSV), passkey-only adoption per group (bounded fan-out of credential
+  status reads, permission-aware), and a client-side membership diff of
+  two group JSON exports.
 - **User detail**: edit fields (username read-only), group chips
   (add/remove), reset password (service-desk flow: one-time credential-reset
   link, with QR), impersonate guidance, passkey-only toggle
-  with register-first lockout protection, passkey count.
+  with register-first lockout protection, passkey count. **Credential
+  status card** (v1.3): live credential types/labels/UUID from
+  `_credential/_status`, permission-aware; **account-recovery card** linking
+  Kanidm's self-service flow honestly (no fake admin email-send).
+- **Settings**: connection + theme + idle sign-out, live server-version
+  compatibility (`X-KANIDM-VERSION`), the **domain editor** (v1.3,
+  `domain_admins`: display name + account-recovery toggle), optional
+  **community locale packs** (audited core stays English-only).
 - **Groups**: search, nested-group filter, pagination; create/edit/delete;
   managed-by (role-gated); members with add/remove; nested groups;
-  per-group capability descriptions (built-in `idm_*` roles annotated from
-  the server's builtin ACPs, custom groups from their description
-  attribute, editable in the group dialog). Permission denials explain
-  Kanidm's tiered rules (see below).
-- **Apps (OAuth2/OIDC clients)** (`idm_oauth2_admins`): manage your SSO
-  applications end-to-end — public (PKCE) vs basic (confidential) clients,
-  landing/redirect URIs with strict matching, per-group **scope maps**,
-  **supplementary scope maps** and **claim maps**, one-time basic-secret
-  reveal. Real `/v1/oauth2*` endpoints with the same payloads the
-  bootstrap scripts use (verified against v1.10.5 and v1.11.0).
+  **membership CSV import with dry-run adds/removes/conflicts report** and a
+  canonical JSON export (v1.3); per-group capability descriptions (built-in
+  `idm_*` roles annotated from the server's builtin ACPs, custom groups from
+  their description attribute, editable in the group dialog). Permission
+  denials explain Kanidm's tiered rules (see below).
+- **Apps (OAuth2/OIDC clients)** (`idm_oauth2_admins`): public (PKCE) vs
+  basic (confidential) clients. Create fields are the same either way —
+  Kanidm never accepts a secret on create; it generates one. After save,
+  the landing URL is written as a redirect origin and a basic secret is
+  shown once. Detail page: strict matching, extra origins, per-group
+  **scope / supplementary-scope / claim maps**, **Reveal basic secret**.
+  Operator guide: [`docs/APPS.md`](docs/APPS.md).
 - **Service accounts** (`idm_service_account_admins`): create/delete
   service accounts, and full **API-token lifecycle** — list (with
   read-only/read-write badges), issue with optional expiry/compact, the
@@ -199,7 +216,7 @@ PKCE client — there is no secret):
 | --- | --- | --- |
 | `apiUrl` | `https://idm.example.com/v1` | Kanidm REST base, **ends in `/v1`** |
 | `oidcClientId` | `shenasa_admin_ui` | public OAuth2 client |
-| `oidcScope` | `openid profile email` | |
+| `oidcScope` | `openid profile email groups` | without `groups` Kanidm will not emit the SPNs Shenasa maps to UI roles |
 | `oidcRedirectUri` | `https://idm.example.com/oauth2/redirect` | must be registered on the client |
 | `theme` | `light` | `light`/`dark`/`auto` |
 
@@ -232,9 +249,10 @@ Overrides (precedence: URL query > localStorage (Settings page) > defaults):
   in localStorage except the public config override).
 - RBAC only gates UI elements; every operation is re-authorised by Kanidm.
 - Content-Security-Policy: `script-src 'self'` (no inline JS anywhere),
-  `style-src 'self' 'unsafe-inline'`, `img-src 'self' data:`, plus
-  `object-src 'none'`, `frame-ancestors 'none'`, `base-uri`/`form-action
-  'self'`. Reverse proxies add HSTS, `X-Content-Type-Options`,
+  `style-src 'self'` (**no `unsafe-inline` since v1.3** — chart swatches are
+  SVG attributes, everything else is external CSS), `img-src 'self' data:`,
+  plus `object-src 'none'`, `frame-ancestors 'none'`, `base-uri`/
+  `form-action 'self'`. Reverse proxies add HSTS, `X-Content-Type-Options`,
   `X-Frame-Options DENY`, `Referrer-Policy no-referrer` and a
   `Permissions-Policy`.
 - All user-provided values are escaped (`Ui.esc`) before reaching HTML; the
@@ -264,8 +282,10 @@ css/styles.css        design tokens, light/dark themes
 js/  config.js i18n.js store.js api.js validation.js ui.js auth.js
      qrcode.js pages.js app.js        (plain scripts, loaded in order)
 docs/  openapi.yaml          endpoints the client uses
-       USER-GUIDE.md         full usage guide + RBAC/tiering best practice
-       RELEASING.md          maintainer release/publishing procedure
+       USER-GUIDE.md         every page + RBAC/tiering
+       APPS.md               OAuth2/OIDC operator guide
+       GITHUB-RELEASE-v1.3.0.md  paste-ready GitHub release pack
+       RELEASING.md          maintainer release procedure
        ROADMAP.md            public development roadmap
        security-audit-1.0.0.md   pre-1.0 audit evidence
 deploy/               docker-compose, Caddyfile, nginx examples, scripts
@@ -275,9 +295,13 @@ test/     smoke.test.js (jsdom), integration.sh (real Kanidm)
 
 ## Documentation
 
-- **[docs/USER-GUIDE.md](docs/USER-GUIDE.md)** — how to use every page,
-  everyday operations cookbook, and a full **RBAC & tiering best practice**
-  section for Kanidm delegation.
+- **[docs/USER-GUIDE.md](docs/USER-GUIDE.md)** — how every page works,
+  everyday operations, and the **RBAC & tiering** model.
+- **[docs/APPS.md](docs/APPS.md)** — OAuth2/OIDC clients: create contract,
+  secret/origin behaviour, scope maps, adding a third-party app.
+- **[docs/GITHUB-RELEASE-v1.3.0.md](docs/GITHUB-RELEASE-v1.3.0.md)** —
+  paste-ready GitHub About text, tag commands; notes in
+  [`docs/RELEASE-NOTES-v1.3.0.md`](docs/RELEASE-NOTES-v1.3.0.md).
 - **[docs/openapi.yaml](docs/openapi.yaml)** — the Kanidm endpoints the
   client uses.
 - **[docs/security-audit-1.0.0.md](docs/security-audit-1.0.0.md)** —

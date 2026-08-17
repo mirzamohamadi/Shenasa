@@ -29,18 +29,40 @@ const MIME = {
 };
 
 // Development server: mirrors the production security headers plus CSP.
+// SHENASA_ALLOW_FRAME=1 drops X-Frame-Options / frame-ancestors so the
+// UI can be previewed inside a local iframe (never used in production).
+const allowFrame = process.env.SHENASA_ALLOW_FRAME === '1';
 const HEADERS = {
-  'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+  'Content-Security-Policy': allowFrame
+    ? "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https:; object-src 'none'; base-uri 'self'; form-action 'self'"
+    : "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
   'X-Content-Type-Options': 'nosniff',
-  'X-Frame-Options': 'DENY',
   'Referrer-Policy': 'no-referrer'
 };
+if (!allowFrame) HEADERS['X-Frame-Options'] = 'DENY';
+
+function resolveSafe(urlPath) {
+  let decoded;
+  try { decoded = decodeURIComponent(urlPath); } catch (e) { return null; }
+  let rel = path.normalize(decoded).replace(/^([.][.][/\\])+/, '');
+  if (rel.startsWith('/')) rel = rel.slice(1);
+  const parts = rel.split(/[/\\]/);
+  // Never serve VCS / hidden files from the dev server (.git, .env, …).
+  if (parts.some((p) => p === '.git' || (p && p.charAt(0) === '.'))) return null;
+  const abs = path.join(ROOT, rel);
+  const rootPrefix = ROOT.endsWith(path.sep) ? ROOT : ROOT + path.sep;
+  if (abs !== ROOT && !abs.startsWith(rootPrefix)) return null;
+  return abs;
+}
 
 http.createServer((req, res) => {
-  const urlPath = decodeURIComponent((req.url || '/').split('?')[0]);
-  let rel = path.normalize(urlPath).replace(/^([.][.][/\\])+/, '');
-  let abs = path.join(ROOT, rel);
-  if (!abs.startsWith(ROOT)) abs = ROOT;
+  const urlPath = (req.url || '/').split('?')[0];
+  let abs = resolveSafe(urlPath);
+  if (!abs) {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', ...HEADERS });
+    res.end('404 Not Found');
+    return;
+  }
   let stat;
   try {
     stat = fs.statSync(abs);

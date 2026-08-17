@@ -173,6 +173,7 @@
           : context === 'groups' ? t('error.403.groups')
           : context === 'oauth2' ? t('error.403.oauth2')
           : context === 'svcaccounts' ? t('error.403.svcaccounts')
+          : context === 'domain' ? t('error.403.domain')
           : t('error.403');
         // A read-only (privilege-capable, not yet stepped-up) session is
         // denied EVERY write before roles are checked — if that's our
@@ -266,13 +267,15 @@
       '</div>';
   }
 
-  // columns: [{ key, label, render(row) -> html, className }]
+  // columns: [{ key, label, render(row) -> html, className, labelHtml }]
+  // `label` is escaped; `labelHtml` is inserted RAW and is reserved for
+  // self-authored control markup (e.g. the select-all checkbox).
   // Returns a HTML string; bindPagination wires the prev/next buttons.
   function tableHtml(columns, rows, info, emptyHtml) {
     var html = '<div class="table-wrap"><table class="table"><thead><tr>';
     for (var i = 0; i < columns.length; i++) {
       html += '<th scope="col"' + (columns[i].className ? ' class="' + columns[i].className + '"' : '') + '>' +
-        esc(columns[i].label) + '</th>';
+        (columns[i].labelHtml != null ? columns[i].labelHtml : esc(columns[i].label)) + '</th>';
     }
     html += '</tr></thead><tbody>';
     if (!rows.length) {
@@ -342,7 +345,11 @@
           ' A' + r + ' ' + r + ' 0 ' + large + ' 1 ' + x1.toFixed(2) + ' ' + y1.toFixed(2) +
           '" fill="none" stroke="' + color + '" stroke-width="' + stroke + '"/>';
       }
-      legend += '<li><span class="dot" style="background:' + color + '"></span>' +
+      // The swatch is an inline SVG rect with a `fill` ATTRIBUTE, not an
+      // inline style — a style ATTRIBUTE in markup is blocked by the strict
+      // style-src 'self' CSP, SVG presentation attributes are not.
+      legend += '<li><svg class="dot" viewBox="0 0 10 10" aria-hidden="true">' +
+        '<rect width="10" height="10" rx="2" fill="' + color + '"/></svg>' +
         esc(seg.label) + ' <strong>' + esc(String(seg.value)) + '</strong></li>';
     }
     out += '<text x="' + cx + '" y="' + cy + '" text-anchor="middle" dominant-baseline="central" class="chart-total">' +

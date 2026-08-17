@@ -457,3 +457,70 @@ button.topbar-scope-btn:disabled { opacity: 0.65; cursor: wait; }
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: 0.001s !important; transition-duration: 0.001s !important; }
 }
+
+/* ---- v1.3 additions ---------------------------------------------------- */
+
+/* WCAG 2.2 AA: skip link (visible only when focused). */
+.skip-link {
+  position: absolute;
+  top: -48px;
+  left: var(--space-3);
+  z-index: 200;
+  background: var(--accent);
+  color: #fff;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  text-decoration: none;
+  transition: top 0.15s ease;
+}
+.skip-link:focus, .skip-link:focus-visible { top: var(--space-2); color: #fff; }
+
+/* Bulk-action bar (users page). */
+.bulkbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin: 0 0 var(--space-3) 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-alt, rgba(127, 127, 127, 0.06));
+}
+.bulkbar[hidden] { display: none; }
+.bulkbar-count { font-weight: 600; }
+.col-check { width: 34px; text-align: center; }
+.col-check input { margin: 0; }
+.bulk-report-title { font-size: 0.95rem; margin: var(--space-3) 0 var(--space-1) 0; }
+.bulk-report-list { margin: 0; padding-left: var(--space-5, 1.25rem); max-height: 180px; overflow-y: auto; }
+
+/* Report controls. */
+.report-controls { display: flex; align-items: flex-end; gap: var(--space-3); flex-wrap: wrap; margin-bottom: var(--space-3); }
+.report-controls .field { margin-bottom: 0; min-width: 160px; }
+
+/* Verdict / stat chips. */
+.chip-add, .chip-remove, .chip-skip, .chip-conflict, .chip-stat, .chip-danger {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 0.78em;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+.chip-add, .chip-remove:first-letter { text-transform: none; }
+.chip-add { background: rgba(102, 145, 110, 0.16); border-color: #66916e; color: #3f6b49; }
+.chip-remove, .chip-danger { background: rgba(176, 96, 96, 0.16); border-color: #b06060; color: #8f4444; }
+.chip-skip { background: rgba(133, 151, 184, 0.18); border-color: #8597b8; color: #4a5a78; }
+.chip-conflict { background: rgba(194, 133, 71, 0.16); border-color: #c28547; color: #915f2c; }
+.chip-stat { background: rgba(59, 110, 165, 0.12); border-color: #3b6ea5; color: #2c5580; }
+[data-theme="dark"] .chip-add { color: #9fc4a6; }
+[data-theme="dark"] .chip-remove, [data-theme="dark"] .chip-danger { color: #d89a9a; }
+[data-theme="dark"] .chip-skip { color: #b3c0d4; }
+[data-theme="dark"] .chip-conflict { color: #ddb588; }
+[data-theme="dark"] .chip-stat { color: #a9c6e2; }
+
+/* Legend swatches are inline SVGs (CSP-safe — see ui.js svgPie). */
+.chart-legend .dot { vertical-align: -1px; margin-right: var(--space-1); }
+
+/* noscript notice (was an inline style attribute — blocked by strict CSP). */
+.noscript-note { padding: 2rem; font-family: system-ui, sans-serif; }

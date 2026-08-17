@@ -133,10 +133,11 @@
   // ======================================================================
   // Users
   // ======================================================================
-  var usersState = { q: '', group: '', page: 1, people: [], groups: [] };
+  var usersState = { q: '', group: '', page: 1, people: [], groups: [], selected: {} };
 
   Pages.users = async function (root) {
     usersState.page = 1;
+    usersState.selected = {};
     root.innerHTML = '<h1 class="page-title">' + esc(t('users.title')) + '</h1>' + global.Ui.spinner();
     try {
       var results = await Promise.all([global.Api.listPeople(), global.Api.listGroups()]);
@@ -151,6 +152,8 @@
   function renderUsers(root) {
     var canManage = global.Store.canManagePeople();
     var canPii = global.Store.canReadPii();
+    var canGroup = global.Store.canManageGroups() || global.Store.canEditGroupMembers();
+    var canBulk = canManage || canGroup;
 
     var groupOptions = ['<option value="">' + esc(t('common.all')) + '</option>'];
     for (var i = 0; i < usersState.groups.length; i++) {
@@ -164,10 +167,19 @@
       '<select class="input" data-users-group aria-label="' + esc(t('users.filterGroup')) + '">' + groupOptions.join('') + '</select>' +
       '<span class="toolbar-spacer"></span>' +
       (canManage ? '<button class="btn btn-primary" data-users-new>' + esc(t('users.new')) + '</button>' : '') +
+      (canManage ? '<button class="btn" data-users-onboard>' + esc(t('users.onboard')) + '</button>' : '') +
       (canManage ? '<button class="btn" data-users-import-csv>' + esc(t('users.importCsv')) + '</button>' : '') +
       '<button class="btn" data-users-export-csv>' + esc(t('users.exportCsv')) + '</button>' +
       '<button class="btn" data-users-export-json>' + esc(t('users.exportJson')) + '</button>' +
       '</div>';
+
+    // Bulk-action bar: visible only while at least one row is checked.
+    var bulkbar = canBulk ? '<div class="bulkbar" data-bulkbar hidden>' +
+      '<span class="bulkbar-count" data-bulk-count></span>' +
+      (canGroup ? '<button class="btn btn-sm" data-bulk-add-group>' + esc(t('users.bulk.addGroup')) + '</button>' : '') +
+      (canManage ? '<button class="btn btn-sm" data-bulk-expiry>' + esc(t('users.bulk.expiry')) + '</button>' : '') +
+      '<button class="btn btn-sm btn-ghost" data-bulk-clear>' + esc(t('users.bulk.clear')) + '</button>' +
+      '</div>' : '';
 
     // Filter
     var q = usersState.q.toLowerCase();
@@ -188,7 +200,7 @@
     usersState.page = info.page;
     var now = Date.now();
 
-    var table = global.Ui.tableHtml([
+    var cols = [
       {
         key: 'name', label: t('users.col.name'), render: function (p) {
           var name = global.Api.attr(p, 'name') || '';
@@ -215,9 +227,11 @@
           return btns;
         }
       }
-    ], info.items, info, filtered.length ? t('table.empty') : t('table.empty'));
+    ];
+    if (canBulk) cols.unshift(userSelCol(filtered.length));
+    var table = global.Ui.tableHtml(cols, info.items, info, t('table.empty'));
 
-    root.innerHTML = '<h1 class="page-title">' + esc(t('users.title')) + '</h1>' + toolbar + table;
+    root.innerHTML = '<h1 class="page-title">' + esc(t('users.title')) + '</h1>' + toolbar + bulkbar + table;
 
     // Wire events
     var search = root.querySelector('[data-users-search]');
@@ -254,6 +268,367 @@
     if (exportJson) exportJson.addEventListener('click', function () { exportUsersJson(filtered); });
     var importCsv = root.querySelector('[data-users-import-csv]');
     if (importCsv) importCsv.addEventListener('click', function () { importCsvModal(root); });
+    var onboardBtn = root.querySelector('[data-users-onboard]');
+    if (onboardBtn) onboardBtn.addEventListener('click', function () { onboardWizard(root); });
+
+    // Bulk selection wiring. Row checkboxes update the bar in place (no
+    // re-render — re-rendering on every tick would steal focus); the
+    // select-all box and the Clear button do re-render deliberately.
+    if (canBulk) {
+      var selAll = root.querySelector('[data-select-all]');
+      if (selAll) {
+        selAll.addEventListener('change', function () {
+          if (selAll.checked) {
+            for (var si = 0; si < filtered.length; si++) {
+              var sn = global.Api.attr(filtered[si], 'name') || '';
+              if (sn) usersState.selected[sn] = true;
+            }
+          } else {
+            usersState.selected = {};
+          }
+          renderUsers(root);
+        });
+      }
+      var boxes = root.querySelectorAll('[data-user-select]');
+      for (var bx = 0; bx < boxes.length; bx++) {
+        (function (box) {
+          box.addEventListener('change', function () {
+            var nm = box.getAttribute('data-user-select');
+            if (box.checked) usersState.selected[nm] = true;
+            else delete usersState.selected[nm];
+            updateBulkBar(root);
+          });
+        })(boxes[bx]);
+      }
+      var bAdd = root.querySelector('[data-bulk-add-group]');
+      if (bAdd) bAdd.addEventListener('click', function () { bulkAddGroupModal(root); });
+      var bExp = root.querySelector('[data-bulk-expiry]');
+      if (bExp) bExp.addEventListener('click', function () { bulkExpiryModal(root); });
+      var bClr = root.querySelector('[data-bulk-clear]');
+      if (bClr) bClr.addEventListener('click', function () {
+        usersState.selected = {};
+        renderUsers(root);
+      });
+      updateBulkBar(root);
+    }
+  }
+
+  // ---- Bulk operations ----------------------------------------------------
+  // Selection is a name->true map that survives pagination/filtering, so a
+  // bulk action can span pages. Every bulk action is DRY-RUN FIRST: the
+  // plan (adds / skips / per-user expiry changes) is computed purely by
+  // reading server state and is shown for confirmation before any write.
+
+  function userSelCol(filteredCount) {
+    return {
+      key: '_sel', className: 'col-check',
+      label: t('users.select.all', { n: filteredCount }),
+      labelHtml: '<input type="checkbox" data-select-all aria-label="' +
+        esc(t('users.select.all', { n: filteredCount })) + '"/>',
+      render: function (p) {
+        var name = global.Api.attr(p, 'name') || '';
+        return '<input type="checkbox" data-user-select="' + esc(name) + '"' +
+          (usersState.selected[name] ? ' checked' : '') +
+          ' aria-label="' + esc(t('users.select.row', { name: name })) + '"/>';
+      }
+    };
+  }
+
+  function selectedNames() {
+    var out = [];
+    for (var k in usersState.selected) {
+      if (Object.prototype.hasOwnProperty.call(usersState.selected, k) && usersState.selected[k]) out.push(k);
+    }
+    out.sort();
+    return out;
+  }
+
+  function updateBulkBar(root) {
+    var bar = root.querySelector('[data-bulkbar]');
+    if (!bar) return;
+    var n = selectedNames().length;
+    bar.hidden = n === 0;
+    var cnt = bar.querySelector('[data-bulk-count]');
+    if (cnt) cnt.textContent = t('users.selected', { n: n });
+    var btns = bar.querySelectorAll('button');
+    for (var i = 0; i < btns.length; i++) btns[i].disabled = n === 0;
+  }
+
+  function bulkReportsList(titleKey, items) {
+    var h = '<h3 class="bulk-report-title">' + esc(t(titleKey, { n: items.length })) + '</h3>';
+    if (!items.length) return h;
+    h += '<ul class="bulk-report-list">';
+    for (var i = 0; i < items.length; i++) h += '<li>' + esc(items[i]) + '</li>';
+    return h + '</ul>';
+  }
+
+  function bulkAddGroupModal(root) {
+    var names = selectedNames();
+    if (!names.length) return;
+    var options = ['<option value="">—</option>'];
+    for (var i = 0; i < usersState.groups.length; i++) {
+      var gn = global.Api.attr(usersState.groups[i], 'name') || '';
+      // idm_* role groups change RBAC — those stay a deliberate per-group
+      // action on the group page, never a bulk click.
+      if (!gn || gn.indexOf('idm_') === 0) continue;
+      options.push('<option value="' + esc(gn) + '">' + esc(gn) + '</option>');
+    }
+    var body = html`
+      <p class="muted">${esc(t('bulk.dryRun.help'))}</p>
+      ${global.Ui.fieldHtml({
+        name: 'bulkGroup', label: t('bulk.addGroup.group'),
+        input: '<select class="input" name="bulkGroup">' + options.join('') + '</select>'
+      })}
+      <div data-bulk-report></div>`;
+    var foot = '<button class="btn" data-cancel>' + esc(t('common.cancel')) + '</button>' +
+      '<button class="btn" data-dry>' + esc(t('bulk.dryRun')) + '</button>' +
+      '<button class="btn btn-primary" data-apply disabled>' + esc(t('bulk.apply')) + '</button>';
+    var plan = null;
+    global.Ui.openModal({
+      title: t('bulk.addGroup.title', { n: names.length }),
+      body: body, footer: foot, wide: true,
+      onMount: function (el, close) {
+        el.querySelector('[data-cancel]').addEventListener('click', close);
+        el.querySelector('[data-dry]').addEventListener('click', async function () {
+          var group = el.querySelector('[name=bulkGroup]').value;
+          var report = el.querySelector('[data-bulk-report]');
+          if (!group) return;
+          report.innerHTML = global.Ui.spinner();
+          try {
+            var g = await global.Api.getGroup(group);
+            var memberSet = {};
+            var members = global.Api.attrs(g, 'member');
+            for (var i = 0; i < members.length; i++) memberSet[global.Store.stripDomain(members[i])] = true;
+            var adds = [], skips = [];
+            for (var j = 0; j < names.length; j++) {
+              (memberSet[names[j]] ? skips : adds).push(names[j]);
+            }
+            plan = adds.length ? { group: group, adds: adds } : null;
+            report.innerHTML = bulkReportsList('bulk.report.adds', adds) +
+              bulkReportsList('bulk.report.skips', skips) +
+              (adds.length ? '' : '<p class="muted">' + esc(t('bulk.report.noop')) + '</p>');
+            el.querySelector('[data-apply]').disabled = !plan;
+          } catch (err) {
+            report.innerHTML = '';
+            global.Ui.handleError(err, 'groups');
+          }
+        });
+        el.querySelector('[data-apply]').addEventListener('click', async function () {
+          var apply = el.querySelector('[data-apply]');
+          if (!plan || apply.disabled) return;
+          apply.disabled = true;
+          try {
+            // ONE request adds the whole batch (the _attr/member POST takes
+            // a Vec<String> of values).
+            await global.Api.addGroupMembers(plan.group, plan.adds);
+            global.Ui.toast(t('bulk.done', { ok: plan.adds.length, fail: 0 }), 'ok');
+            usersState.selected = {};
+            close();
+            Pages.users(root);
+          } catch (err) {
+            apply.disabled = false;
+            global.Ui.handleError(err, 'groups');
+          }
+        });
+      }
+    });
+  }
+
+  function bulkExpiryModal(root) {
+    var names = selectedNames();
+    if (!names.length) return;
+    var body = html`
+      <p class="muted">${esc(t('bulk.dryRun.help'))}</p>
+      ${global.Ui.fieldHtml({ name: 'bulkExpire', label: t('bulk.expiry.date'), type: 'date' })}
+      <label class="check"><input type="checkbox" data-exp-clear/> ${esc(t('bulk.expiry.clear'))}</label>
+      <div data-bulk-report></div>`;
+    var foot = '<button class="btn" data-cancel>' + esc(t('common.cancel')) + '</button>' +
+      '<button class="btn" data-dry>' + esc(t('bulk.dryRun')) + '</button>' +
+      '<button class="btn btn-primary" data-apply disabled>' + esc(t('bulk.apply')) + '</button>';
+    // plan items: { name, expire } where expire is [] (purge) or a RFC3339
+    // string. PATCH semantics are purge-then-present per attribute
+    // (ModifyList::from_patch, server/lib/src/modify.rs:149), so an EMPTY
+    // array is exactly how account_expire is cleared — allowed by
+    // idm_acp_people_manage (AccountExpire sits in both modify_present and
+    // modify_removed attrs, dl14 + dl15).
+    var plan = [];
+    global.Ui.openModal({
+      title: t('bulk.expiry.title', { n: names.length }),
+      body: body, footer: foot, wide: true,
+      onMount: function (el, close) {
+        el.querySelector('[data-cancel]').addEventListener('click', close);
+        el.querySelector('[data-exp-clear]').addEventListener('change', function (e) {
+          el.querySelector('[name=bulkExpire]').disabled = e.target.checked;
+        });
+        el.querySelector('[data-dry]').addEventListener('click', function () {
+          var clear = el.querySelector('[data-exp-clear]').checked;
+          var dateVal = el.querySelector('[name=bulkExpire]').value;
+          var report = el.querySelector('[data-bulk-report]');
+          if (!clear && !dateVal) {
+            report.innerHTML = '<p class="muted">' + esc(t('bulk.expiry.pick')) + '</p>';
+            return;
+          }
+          var newVal = clear ? null : global.Ui.toRfc3339(dateVal, /* endOfDay */ false);
+          var newMs = newVal ? Date.parse(newVal) : null;
+          plan = [];
+          var rows = '<table class="table"><thead><tr><th scope="col">' + esc(t('bulk.col.user')) + '</th>' +
+            '<th scope="col">' + esc(t('bulk.col.current')) + '</th>' +
+            '<th scope="col">' + esc(t('bulk.col.new')) + '</th></tr></thead><tbody>';
+          for (var i = 0; i < names.length; i++) {
+            var nm = names[i];
+            var person = null;
+            for (var k = 0; k < usersState.people.length; k++) {
+              if ((global.Api.attr(usersState.people[k], 'name') || '') === nm) { person = usersState.people[k]; break; }
+            }
+            var cur = person ? global.Api.attr(person, 'account_expire') : undefined;
+            var curMs = cur ? Date.parse(String(cur)) : null;
+            var unchanged = (curMs == null && newMs == null) ||
+              (curMs != null && newMs != null && curMs === newMs);
+            if (!unchanged) plan.push({ name: nm, expire: clear ? [] : newVal });
+            rows += '<tr><td>' + esc(nm) + '</td><td>' + esc(global.Ui.formatDate(cur)) + '</td>' +
+              '<td>' + (unchanged ? '<span class="muted">' + esc(t('bulk.unchanged')) + '</span>'
+                : esc(clear ? '—' : global.Ui.formatDate(newVal))) + '</td></tr>';
+          }
+          rows += '</tbody></table>';
+          report.innerHTML = rows + (plan.length ? '' : '<p class="muted">' + esc(t('bulk.report.noop')) + '</p>');
+          el.querySelector('[data-apply]').disabled = plan.length === 0;
+        });
+        el.querySelector('[data-apply]').addEventListener('click', async function () {
+          var apply = el.querySelector('[data-apply]');
+          if (!plan.length || apply.disabled) return;
+          apply.disabled = true;
+          var ok = 0;
+          var failures = [];
+          for (var i = 0; i < plan.length; i++) {
+            try {
+              await global.Api.updatePerson(plan[i].name, { expire: plan[i].expire });
+              ok++;
+            } catch (err) {
+              failures.push(plan[i].name + ': ' + (err && err.message ? err.message : 'error'));
+            }
+          }
+          global.Ui.toast(t('bulk.done', { ok: ok, fail: failures.length }), failures.length ? 'warn' : 'ok');
+          if (failures.length) {
+            el.querySelector('[data-bulk-report]').innerHTML =
+              '<h3 class="bulk-report-title">' + esc(t('bulk.failures')) + '</h3><ul class="bulk-report-list">' +
+              failures.map(function (f) { return '<li>' + esc(f) + '</li>'; }).join('') + '</ul>';
+            apply.disabled = false;
+          } else {
+            usersState.selected = {};
+            close();
+            Pages.users(root);
+          }
+        });
+      }
+    });
+  }
+
+  // v1.3: guided onboarding — person → baseline groups → first-sign-in
+  // link in ONE modal. Composes only already-verified endpoints
+  // (POST /v1/person, group _attr/member, credential intent); re-renders
+  // one step container instead of fake multi-page state.
+  function onboardWizard(root) {
+    var state = { name: '' };
+    var m = global.Ui.openModal({
+      title: t('users.onboard.title'),
+      body: '<div data-onboard-step></div>',
+      footer: '<div class="btn-row" data-onboard-foot></div>',
+      wide: true
+    });
+    var stepEl = m.el.querySelector('[data-onboard-step]');
+    var footEl = m.el.querySelector('[data-onboard-foot]');
+
+    function step1() {
+      stepEl.innerHTML = '<p class="muted">1/3 — ' + esc(t('users.onboard.step1')) + '</p>' +
+        '<form data-onboard-person novalidate>' +
+        global.Ui.fieldHtml({ name: 'name', label: t('users.field.username'), required: true }) +
+        global.Ui.fieldHtml({ name: 'displayname', label: t('users.field.displayName'), required: true }) +
+        global.Ui.fieldHtml({ name: 'mail', label: t('users.field.mail'), type: 'email' }) +
+        '</form>';
+      footEl.innerHTML = '<button class="btn btn-primary" data-onboard-next>' + esc(t('common.next')) + '</button>';
+      footEl.querySelector('[data-onboard-next]').addEventListener('click', async function () {
+        var formEl = stepEl.querySelector('[data-onboard-person]');
+        var data = {
+          name: formEl.querySelector('[name=name]').value.trim(),
+          displayname: formEl.querySelector('[name=displayname]').value.trim(),
+          mail: formEl.querySelector('[name=mail]').value.trim(),
+          validFrom: '', expire: ''
+        };
+        var result = global.Validation.personForm(data, {});
+        if (!result.ok) { global.Ui.showFieldErrors(stepEl, result.errors); return; }
+        var btn = footEl.querySelector('[data-onboard-next]');
+        btn.disabled = true;
+        try {
+          await global.Api.createPerson({
+            name: data.name, displayname: data.displayname, mail: data.mail,
+            validFrom: global.Ui.toRfc3339(data.validFrom), expire: global.Ui.toRfc3339(data.expire, true)
+          });
+          state.name = data.name;
+          step2();
+        } catch (err) {
+          btn.disabled = false;
+          global.Ui.handleError(err, 'people');
+        }
+      });
+    }
+
+    function step2() {
+      var groups = (usersState.groups || [])
+        .map(function (g) { return global.Api.attr(g, 'name') || ''; })
+        .filter(function (n) { return n && n.indexOf('idm_') !== 0 && n !== 'domain_admins' && n !== 'system_admins'; })
+        .sort();
+      stepEl.innerHTML = '<p class="muted">2/3 — ' + esc(t('users.onboard.step2')) + '</p>' +
+        (groups.length
+          ? '<div class="chip-col">' + groups.map(function (g) {
+              return '<label class="check"><input type="checkbox" data-onboard-group value="' + esc(g) + '" /> ' + esc(g) + '</label>';
+            }).join('') + '</div>'
+          : '<p class="muted">' + esc(t('common.none')) + '</p>');
+      footEl.innerHTML = '<button class="btn" data-onboard-skip>' + esc(t('common.skip')) + '</button>' +
+        '<button class="btn btn-primary" data-onboard-next>' + esc(t('common.next')) + '</button>';
+      footEl.querySelector('[data-onboard-skip]').addEventListener('click', step3);
+      footEl.querySelector('[data-onboard-next]').addEventListener('click', async function () {
+        var btn = footEl.querySelector('[data-onboard-next]');
+        btn.disabled = true;
+        try {
+          var checked = stepEl.querySelectorAll('[data-onboard-group]:checked');
+          for (var i = 0; i < checked.length; i++) {
+            await global.Api.addGroupMember(checked[i].value, state.name);
+          }
+          step3();
+        } catch (err) {
+          btn.disabled = false;
+          global.Ui.handleError(err, 'groups');
+        }
+      });
+    }
+
+    function step3() {
+      footEl.innerHTML = '';
+      stepEl.innerHTML = '<p class="muted">3/3 — ' + esc(t('users.onboard.step3')) + '</p>' + global.Ui.spinner();
+      (async function () {
+        var res = await global.Api.resetPassword(state.name);
+        var token = res && (res.token || res.intent_id || res.intentToken || '');
+        var link = token
+          ? global.ShenaConfig.oauthBase() + '/ui/reset?token=' + encodeURIComponent(String(token))
+          : '';
+        stepEl.innerHTML = '<p class="muted">3/3 — ' + esc(t('users.onboard.step3')) + '</p>' +
+          (link
+            ? '<p>' + esc(t('users.onboard.share')) + '</p>' +
+              '<p><code class="break-all">' + esc(link) + '</code></p>' +
+              '<button class="btn" data-copy-link>' + esc(t('common.copy')) + '</button>' +
+              (qrSvg(link) ? '<p class="muted">' + esc(t('resetlink.scan')) + '</p><div class="qr-box">' + qrSvg(link) + '</div>' : '')
+            : '<p>' + esc(t('users.onboard.created', { name: state.name })) + '</p>' +
+              '<pre class="log-box">' + esc(JSON.stringify(res, null, 2)) + '</pre>');
+        var copyBtn = stepEl.querySelector('[data-copy-link]');
+        if (copyBtn) copyBtn.addEventListener('click', function () { global.Ui.copyText(link); });
+        global.Ui.toast(t('users.onboard.created', { name: state.name }), 'success');
+        if (root.getAttribute('data-page') !== 'user') Pages.users(root);
+      })().catch(function (err) {
+        global.Ui.handleError(err, 'people');
+      });
+    }
+
+    step1();
   }
 
   function confirmDeleteUser(root, name) {
@@ -410,6 +785,7 @@
       reader.onload = function () {
         var rows = parseCsv(String(reader.result || ''));
         if (rows.length && String(rows[0][0]).toLowerCase() === 'name') rows.shift();
+        if (rows.length > 2000) rows = rows.slice(0, 2000);
         parsed = rows;
         var htmlStr = '<table class="table"><thead><tr><th>name</th><th>displayname</th><th>mail</th></tr></thead><tbody>';
         for (var i = 0; i < rows.length; i++) {
@@ -466,16 +842,52 @@
     root.setAttribute('data-page', 'user');
     root.innerHTML = '<p><a class="link" href="#/users">← ' + esc(t('common.back')) + '</a></p>' + global.Ui.spinner();
     try {
-      var results = await Promise.all([global.Api.getPerson(name), global.Api.listGroups()]);
+      // Credential status needs the credential-reset ACPs — readers without
+      // them would break the whole page on 403, so tolerate and hide.
+      var credsP = global.Api.getCredentialStatus(name).catch(function (e) {
+        if (e && e.status === 403) return 'restricted';
+        throw e;
+      });
+      var results = await Promise.all([global.Api.getPerson(name), global.Api.listGroups(), credsP]);
       var person = results[0];
       var groups = results[1] || [];
-      renderUserDetail(root, person, groups);
+      renderUserDetail(root, person, groups, results[2]);
     } catch (err) {
       loadError(root, err, 'people');
     }
   };
 
-  function renderUserDetail(root, person, groups) {
+  // CredentialDetailType rendering (proto/src/internal/credupdate.rs —
+  // serde externally-tagged, exact case, `type_` has no rename):
+  // "Password" | "GeneratedPassword" | {Passkey:[labels]} |
+  // {PasswordMfa:[[totpLabels],[securityKeyLabels],backupCodeCount]}.
+  function credDetailRows(creds) {
+    if (!creds || !creds.length) return '<p class="muted">' + esc(t('user.creds.none')) + '</p>';
+    return creds.map(function (cd) {
+      var type = cd ? cd.type_ : null;
+      var uuid = cd && cd.uuid ? String(cd.uuid) : '';
+      var badge = t('common.unknown');
+      var detail = '';
+      if (type === 'Password') badge = t('user.creds.password');
+      else if (type === 'GeneratedPassword') badge = t('user.creds.generatedPassword');
+      else if (type && type.Passkey) {
+        badge = t('user.creds.passkey');
+        detail = (type.Passkey || []).map(function (l) { return esc(String(l)); }).join(', ');
+      } else if (type && type.PasswordMfa) {
+        badge = t('user.creds.mfa');
+        var pm = type.PasswordMfa || [];
+        var parts = [];
+        if (pm[0] && pm[0].length) parts.push(esc(t('user.creds.totp')) + ': ' + pm[0].map(function (l) { return esc(String(l)); }).join(', '));
+        if (pm[1] && pm[1].length) parts.push(esc(t('user.creds.securityKey')) + ': ' + pm[1].map(function (l) { return esc(String(l)); }).join(', '));
+        if (pm[2]) parts.push(esc(t('user.creds.backupCodes', { count: pm[2] })));
+        detail = parts.join(' · ');
+      }
+      return '<div class="kv" data-cred-row><span class="kv-k">' + esc(badge) + '</span><span class="kv-v">' +
+        (detail ? detail + ' ' : '') + '<code class="mono muted">' + esc(uuid) + '</code></span></div>';
+    }).join('');
+  }
+
+  function renderUserDetail(root, person, groups, credStatus) {
     var name = global.Api.attr(person, 'name') || '';
     var displayname = global.Api.attr(person, 'displayname') || '';
     var uuid = global.Api.attr(person, 'uuid') || '';
@@ -539,8 +951,28 @@
       ${canManage ? '<label class="check"><input type="checkbox" data-passkey-only ' + (passkeyOnly ? 'checked' : '') + '/> ' +
         esc(t('user.detail.passkeyOnly')) + '</label>' : ''}`);
 
+    // v1.3: real credential status (GET _credential/_status) — hidden for
+    // callers without the credential-reset ACPs ('restricted').
+    var credsCard = null;
+    if (credStatus === 'restricted') {
+      credsCard = card(t('user.creds.title'), '<p class="muted">' + esc(t('user.creds.restricted')) + '</p>');
+    } else if (credStatus && Array.isArray(credStatus.creds)) {
+      credsCard = card(t('user.creds.title'), credDetailRows(credStatus.creds));
+    }
+
+    // v1.3: account recovery is user SELF-service at the IdP — upstream
+    // exposes no admin "send recovery email" REST surface (verified:
+    // v1.rs has no such route), so we link honestly instead of faking one.
+    var recoverBase = global.ShenaConfig.oauthBase();
+    var recoverHref = global.ShenaConfig.isSafeHttpUrl(recoverBase) ? recoverBase + '/ui/recover' : '#';
+    var recoveryCard = canReset ? card(t('user.recovery.title'),
+      '<p>' + esc(t('user.recovery.hint')) + '</p>' +
+      '<p><a class="link" href="' + esc(recoverHref) + '" target="_blank" rel="noopener noreferrer">' +
+      esc(t('user.recovery.open')) + '</a></p>') : '';
+
     root.innerHTML = '<p><a class="link" href="#/users">← ' + esc(t('common.back')) + '</a></p>' +
-      title + '<div class="grid-2">' + infoCard + securityCard + '</div>' + groupsCard;
+      title + '<div class="grid-2">' + infoCard + securityCard + '</div>' + groupsCard +
+      (credsCard || '') + recoveryCard;
 
     // Wire
     var editBtn = root.querySelector('[data-edit-user]');
@@ -734,6 +1166,8 @@
       esc(t('groups.filterNested')) + '</label>' +
       '<span class="toolbar-spacer"></span>' +
       (canManage ? '<button class="btn btn-primary" data-groups-new>' + esc(t('groups.new')) + '</button>' : '') +
+      (canManage ? '<button class="btn" data-groups-import-members>' + esc(t('groups.importMembers')) + '</button>' : '') +
+      '<button class="btn" data-groups-export-json>' + esc(t('groups.exportJson')) + '</button>' +
       '</div>';
 
     var table = global.Ui.tableHtml([
@@ -787,6 +1221,10 @@
     });
     var newBtn = root.querySelector('[data-groups-new]');
     if (newBtn) newBtn.addEventListener('click', function () { groupFormModal(root, null); });
+    var gExport = root.querySelector('[data-groups-export-json]');
+    if (gExport) gExport.addEventListener('click', exportGroupsJson);
+    var gImport = root.querySelector('[data-groups-import-members]');
+    if (gImport) gImport.addEventListener('click', function () { membershipImportModal(root); });
     var delBtns = root.querySelectorAll('[data-group-delete]');
     for (var d = 0; d < delBtns.length; d++) {
       (function (btn) {
@@ -803,6 +1241,183 @@
         });
       })(delBtns[d]);
     }
+  }
+
+  // JSON export = the canonical input of the Reports-page membership diff.
+  // Shape: { format, version, generatedAt, groups: [{ name, members }] }.
+  function exportGroupsJson() {
+    var out = {
+      format: 'shenasa-group-export',
+      version: 1,
+      generatedAt: new Date().toISOString(),
+      groups: []
+    };
+    for (var i = 0; i < groupsState.groups.length; i++) {
+      var g = groupsState.groups[i];
+      var name = global.Api.attr(g, 'name') || '';
+      if (!name) continue;
+      var members = global.Api.attrs(g, 'member').map(global.Store.stripDomain).sort();
+      out.groups.push({ name: name, members: members });
+    }
+    out.groups.sort(function (a, b) { return a.name.localeCompare(b.name); });
+    global.Ui.download('shenasa-groups.json', JSON.stringify(out, null, 2), 'application/json');
+  }
+
+  // Group-membership CSV import. Dry-run first: every row is classified as
+  // add / remove / no-op / conflict from the CURRENT server state; only
+  // effective changes are applied, batched to ONE request per group and
+  // action (POST/DELETE _attr/member accept value arrays).
+  function membershipImportPlan(rows, groups, people) {
+    var groupSet = {};
+    for (var i = 0; i < groups.length; i++) {
+      var gn = global.Api.attr(groups[i], 'name') || '';
+      if (gn) groupSet[gn] = groups[i];
+    }
+    var peopleSet = {};
+    for (i = 0; i < people.length; i++) {
+      var pn = global.Api.attr(people[i], 'name') || '';
+      if (pn) peopleSet[pn] = true;
+    }
+    var plan = [];
+    for (i = 0; i < rows.length; i++) {
+      var group = String(rows[i][0] || '').trim();
+      var member = global.Store.stripDomain(String(rows[i][1] || '').trim());
+      var action = String(rows[i][2] || '').trim().toLowerCase() || 'add';
+      var entry = { group: group, member: member, action: action, verdict: 'conflict', reason: 'gimport.reason.unknownGroup' };
+      var g = groupSet[group];
+      if (!group || !g) { plan.push(entry); continue; }
+      if (!member || (!peopleSet[member] && !groupSet[member])) {
+        entry.reason = 'gimport.reason.unknownMember';
+        plan.push(entry); continue;
+      }
+      if (action !== 'add' && action !== 'remove') {
+        entry.reason = 'gimport.reason.badAction';
+        plan.push(entry); continue;
+      }
+      var isMember = false;
+      var members = global.Api.attrs(g, 'member');
+      for (var m = 0; m < members.length; m++) {
+        if (global.Store.stripDomain(members[m]) === member) { isMember = true; break; }
+      }
+      if (action === 'add') {
+        entry.verdict = isMember ? 'skip' : 'add';
+        entry.reason = isMember ? 'gimport.reason.alreadyMember' : 'gimport.reason.okAdd';
+      } else {
+        entry.verdict = isMember ? 'remove' : 'skip';
+        entry.reason = isMember ? 'gimport.reason.okRemove' : 'gimport.reason.notMember';
+      }
+      plan.push(entry);
+    }
+    return plan;
+  }
+
+  function membershipImportModal(root) {
+    var fileInput = global.Ui.el('input', 'input');
+    fileInput.type = 'file';
+    fileInput.accept = '.csv,text/csv';
+    var body = global.Ui.el('div');
+    body.appendChild(global.Ui.el('p', 'help', t('gimport.help')));
+    body.appendChild(fileInput);
+    var parsed = null;
+    var preview = global.Ui.el('div');
+    body.appendChild(preview);
+
+    var foot = '<button class="btn" data-cancel>' + esc(t('common.cancel')) + '</button>' +
+      '<button class="btn" data-dry disabled>' + esc(t('bulk.dryRun')) + '</button>' +
+      '<button class="btn btn-primary" data-apply disabled>' + esc(t('bulk.apply')) + '</button>';
+    var plan = null;
+
+    global.Ui.openModal({
+      title: t('gimport.title'),
+      body: body, footer: foot, wide: true,
+      onMount: function (el, close) {
+        fileInput.addEventListener('change', function () {
+          var f = fileInput.files && fileInput.files[0];
+          if (!f) return;
+          var reader = new global.FileReader();
+          reader.onload = function () {
+            var rows = parseCsv(String(reader.result || ''));
+            if (rows.length && String(rows[0][0]).toLowerCase() === 'group') rows.shift();
+            if (rows.length > 2000) rows = rows.slice(0, 2000);
+            parsed = rows;
+            preview.innerHTML = '<p class="muted">' + esc(String(rows.length)) + ' row(s)</p>';
+            el.querySelector('[data-dry]').disabled = rows.length === 0;
+          };
+          reader.readAsText(f);
+        });
+        el.querySelector('[data-cancel]').addEventListener('click', close);
+        el.querySelector('[data-dry]').addEventListener('click', async function () {
+          if (!parsed || !parsed.length) return;
+          var dry = el.querySelector('[data-dry]');
+          dry.disabled = true;
+          try {
+            // Groups are already loaded; people go through the in-flight
+            // de-dupe so a simultaneous Users view never doubles requests.
+            if (!groupsState.people.length) {
+              groupsState.people = await global.Api.listPeople() || [];
+            }
+            plan = membershipImportPlan(parsed, groupsState.groups, groupsState.people);
+            var counts = { add: 0, remove: 0, skip: 0, conflict: 0 };
+            var rowsHtml = '';
+            for (var i = 0; i < plan.length; i++) {
+              var e = plan[i];
+              counts[e.verdict]++;
+              rowsHtml += '<tr><td>' + esc(e.group) + '</td><td>' + esc(e.member) + '</td>' +
+                '<td>' + esc(t(e.action === 'add' ? 'gimport.add' : 'gimport.remove')) + '</td>' +
+                '<td><span class="chip chip-' + e.verdict + '">' + esc(t('gimport.' + e.verdict)) + '</span> ' +
+                '<span class="muted">' + esc(t(e.reason)) + '</span></td></tr>';
+            }
+            preview.innerHTML = '<p class="muted">' + esc(t('gimport.summary', {
+              adds: counts.add, removes: counts.remove, skips: counts.skip, conflicts: counts.conflict
+            })) + '</p>' +
+              '<table class="table"><thead><tr><th scope="col">' + esc(t('gimport.col.group')) + '</th>' +
+              '<th scope="col">' + esc(t('gimport.col.member')) + '</th><th scope="col">' + esc(t('gimport.col.action')) + '</th>' +
+              '<th scope="col">' + esc(t('gimport.col.reason')) + '</th></tr></thead><tbody>' + rowsHtml + '</tbody></table>';
+            el.querySelector('[data-apply]').disabled = (counts.add + counts.remove) === 0;
+          } catch (err) {
+            global.Ui.handleError(err, 'groups');
+          } finally {
+            dry.disabled = false;
+          }
+        });
+        el.querySelector('[data-apply]').addEventListener('click', async function () {
+          var apply = el.querySelector('[data-apply]');
+          if (!plan || apply.disabled) return;
+          apply.disabled = true;
+          // Batch effective changes per (group, action).
+          var byGroup = {};
+          for (var i = 0; i < plan.length; i++) {
+            var e = plan[i];
+            if (e.verdict !== 'add' && e.verdict !== 'remove') continue;
+            var k = e.group + '\u0000' + e.verdict;
+            if (!byGroup[k]) byGroup[k] = { group: e.group, verdict: e.verdict, members: [] };
+            byGroup[k].members.push(e.member);
+          }
+          var ok = 0;
+          var failures = [];
+          for (var key in byGroup) {
+            if (!Object.prototype.hasOwnProperty.call(byGroup, key)) continue;
+            var job = byGroup[key];
+            try {
+              if (job.verdict === 'add') await global.Api.addGroupMembers(job.group, job.members);
+              else await global.Api.removeGroupMembers(job.group, job.members);
+              ok++;
+            } catch (err) {
+              failures.push(job.group + ' (' + job.verdict + '): ' + (err && err.message ? err.message : 'error'));
+            }
+          }
+          global.Ui.toast(t('gimport.applied', { ok: ok, fail: failures.length }), failures.length ? 'warn' : 'ok');
+          if (failures.length) {
+            preview.innerHTML = '<h3 class="bulk-report-title">' + esc(t('bulk.failures')) + '</h3><ul class="bulk-report-list">' +
+              failures.map(function (f) { return '<li>' + esc(f) + '</li>'; }).join('') + '</ul>';
+            apply.disabled = false;
+          } else {
+            close();
+            Pages.groups(root);
+          }
+        });
+      }
+    });
   }
 
   function groupFormModal(root, group) {
@@ -1099,6 +1714,27 @@
     return card(title, body);
   }
 
+  // Basic vs public is a class (oauth2_resource_server_basic) plus the
+  // hidden secret attr. Kanidm never converts one into the other.
+  function isOauth2Basic(en) {
+    var classes = global.Api.attrs(en, 'class');
+    return classes.indexOf('oauth2_resource_server_basic') >= 0 ||
+      global.Api.attrs(en, 'oauth2_rs_basic_secret').length > 0;
+  }
+
+  // GET /v1/oauth2/{id}/_basic_secret returns the current secret as a JSON
+  // string. Shown once after create, and later via Reveal. Never accepted
+  // as an input on create — Kanidm generates it.
+  function showOauth2SecretModal(secret) {
+    var body = '<p>' + esc(t('apps.secret.warning')) + '</p>' +
+      '<p><code class="break-all">' + esc(String(secret)) + '</code></p>' +
+      '<button class="btn" data-copy-secret>' + esc(t('common.copy')) + '</button>';
+    var m = global.Ui.openModal({ title: t('apps.secret'), body: body, wide: true });
+    var b = m.el.querySelector('[data-copy-secret]');
+    if (b) b.addEventListener('click', function () { global.Ui.copyText(String(secret)); });
+    return m;
+  }
+
   function oauthClientDialog(root, existing) {
     var isEdit = !!existing;
     var body = html`
@@ -1107,7 +1743,7 @@
           '<select class="input" id="f-ctype" name="clientType">' +
           '<option value="public">' + esc(t('apps.type.public')) + '</option>' +
           '<option value="basic">' + esc(t('apps.type.basic')) + '</option>' +
-          '</select><p class="help">' + esc(t('apps.field.type.help')) + '</p></div>' : ''}
+          '</select><p class="help" data-type-note>' + esc(t('apps.field.type.live.public')) + '</p></div>' : ''}
         ${global.Ui.fieldHtml({ name: 'name', label: t('apps.field.name'), value: isEdit ? existing.name : '', required: true, readonly: isEdit, help: isEdit ? t('apps.field.name.immutable') : t('apps.field.name.help') })}
         ${global.Ui.fieldHtml({ name: 'displayname', label: t('apps.field.displayName'), value: isEdit ? existing.displayname : '', required: true })}
         ${global.Ui.fieldHtml({ name: 'originLanding', label: t('apps.field.landing'), value: isEdit ? existing.landing : '', required: true, placeholder: 'https://app.example.com/oauth2/callback', help: t('apps.field.landing.help') })}
@@ -1120,6 +1756,14 @@
       footer: foot,
       onMount: function (el, close) {
         el.querySelector('[data-cancel]').addEventListener('click', close);
+        var typeSel = el.querySelector('[name=clientType]');
+        var typeNote = el.querySelector('[data-type-note]');
+        if (typeSel && typeNote) {
+          typeSel.addEventListener('change', function () {
+            typeNote.textContent = t(typeSel.value === 'basic'
+              ? 'apps.field.type.live.basic' : 'apps.field.type.live.public');
+          });
+        }
         el.querySelector('[data-submit]').addEventListener('click', async function () {
           var form = el.querySelector('[data-client-form]');
           var data = {
@@ -1141,9 +1785,32 @@
               var kind = (form.querySelector('[name=clientType]') || {}).value || 'public';
               var fn = kind === 'basic' ? 'createOauth2BasicClient' : 'createOauth2PublicClient';
               await global.Api[fn](data);
-              global.Ui.toast(t('apps.created'), 'success');
+              // Create never writes oauth2_rs_origin (verified
+              // idm_oauth2_rs_{basic,public}_create). With
+              // oauth2_strict_redirect_uri=true, SSO rejects the callback
+              // until an origin exists — same PATCH bootstrap/integration use.
+              try {
+                await global.Api.updateOauth2Client(data.name, {
+                  oauth2_rs_origin: [data.originLanding]
+                });
+              } catch (origErr) {
+                global.Ui.toast(t('apps.origin.autoFailed'), 'warning');
+              }
+              var secret = null;
+              if (kind === 'basic') {
+                try { secret = await global.Api.getOauth2BasicSecret(data.name); }
+                catch (secErr) { secret = null; }
+              }
               close();
-              Pages.appDetail(root, data.name);
+              global.Ui.toast(t('apps.created'), 'success');
+              // Hash so refresh / back keep the detail page (the secret
+              // card lives there, not as a tab on this form).
+              if (global.location) {
+                global.location.hash = '#/apps/' + encodeURIComponent(data.name);
+              } else {
+                Pages.appDetail(root, data.name);
+              }
+              if (secret != null && String(secret) !== '') showOauth2SecretModal(secret);
             }
           } catch (err) {
             if (err && err.status === 400 && err.message) global.Ui.toast(err.message, 'error');
@@ -1183,9 +1850,7 @@
           var dm = global.Api.attr(en, 'displayname') || '—';
           var landing = global.Api.attr(en, 'oauth2_rs_origin_landing') || '—';
           var sm = global.Api.attrs(en, 'oauth2_rs_scope_map');
-          var classes = global.Api.attrs(en, 'class');
-          var isBasic = classes.indexOf('oauth2_resource_server_basic') >= 0 ||
-            global.Api.attrs(en, 'oauth2_rs_basic_secret').length > 0;
+          var isBasic = isOauth2Basic(en);
           body += '<tr data-name="' + esc((nm + ' ' + dm).toLowerCase()) + '">' +
             '<td><a href="#/apps/' + encodeURIComponent(nm) + '"><code>' + esc(nm) + '</code></a></td>' +
             '<td>' + esc(dm) + '</td>' +
@@ -1224,9 +1889,7 @@
     try {
       var en = await global.Api.getOauth2Client(name);
       var canManage = true; // page itself is role-gated
-      var classes = global.Api.attrs(en, 'class');
-      var isBasic = classes.indexOf('oauth2_resource_server_basic') >= 0 ||
-        global.Api.attrs(en, 'oauth2_rs_basic_secret').length > 0;
+      var isBasic = isOauth2Basic(en);
       var displayname = global.Api.attr(en, 'displayname') || '';
       var landing = global.Api.attr(en, 'oauth2_rs_origin_landing') || '';
       var strict = (global.Api.attr(en, 'oauth2_strict_redirect_uri') || 'false') === 'true';
@@ -1328,13 +1991,7 @@
       if (rev) rev.addEventListener('click', async function () {
         rev.disabled = true;
         try {
-          var secret = await global.Api.getOauth2BasicSecret(name);
-          var body = '<p>' + esc(t('apps.secret.warning')) + '</p>' +
-            '<p><code class="break-all">' + esc(String(secret)) + '</code></p>' +
-            '<button class="btn" data-copy-secret>' + esc(t('common.copy')) + '</button>';
-          var m = global.Ui.openModal({ title: t('apps.secret'), body: body, wide: true });
-          var b = m.el.querySelector('[data-copy-secret]');
-          if (b) b.addEventListener('click', function () { global.Ui.copyText(String(secret)); });
+          showOauth2SecretModal(await global.Api.getOauth2BasicSecret(name));
         } catch (err) {
           global.Ui.handleError(err, 'oauth2');
         } finally { rev.disabled = false; }
@@ -1562,10 +2219,10 @@
           <form data-token-form novalidate>
             ${global.Ui.fieldHtml({ name: 'label', label: t('svc.tokens.label'), required: true, placeholder: 'ci-deploy', help: t('svc.tokens.label.help') })}
             ${global.Ui.fieldHtml({ name: 'expiry', label: t('svc.tokens.expiry'), type: 'date', help: t('svc.tokens.expiry.help') })}
-            <div class="field"><label class="check"><input type="checkbox" name="readWrite" /> ' + esc(t('svc.tokens.rwAsk')) + '</label>
-              <p class="help">' + esc(t('svc.tokens.rwHelp')) + '</p></div>
-            <div class="field"><label class="check"><input type="checkbox" name="compact" /> ' + esc(t('svc.tokens.compact')) + '</label>
-              <p class="help">' + esc(t('svc.tokens.compact.help')) + '</p></div>
+            <div class="field"><label class="check"><input type="checkbox" name="readWrite" /> ${esc(t('svc.tokens.rwAsk'))}</label>
+              <p class="help">${esc(t('svc.tokens.rwHelp'))}</p></div>
+            <div class="field"><label class="check"><input type="checkbox" name="compact" /> ${esc(t('svc.tokens.compact'))}</label>
+              <p class="help">${esc(t('svc.tokens.compact.help'))}</p></div>
           </form>`;
         var foot = '<button class="btn" data-cancel>' + esc(t('common.cancel')) + '</button>' +
           '<button class="btn btn-primary" data-submit>' + esc(t('svc.tokens.issue')) + '</button>';
@@ -1813,6 +2470,10 @@
         // Credential enrolment lives in Kanidm's own audited credential
         // manager (no plain webauthn REST endpoints exist in Kanidm 1.10).
         var url = global.Auth.credentialSelfServiceUrl();
+        if (!global.ShenaConfig.isSafeHttpUrl(global.ShenaConfig.oauthBase())) {
+          global.Ui.toast('Configure a valid https API URL first.', 'error');
+          return;
+        }
         try {
           if (typeof global.open === 'function') {
             global.open(url, '_blank', 'noopener');
@@ -1827,11 +2488,14 @@
 
       var pwBtn = root.querySelector('[data-change-password]');
       if (pwBtn) pwBtn.addEventListener('click', function () {
-        var resetUrl = global.ShenaConfig.oauthBase() + '/ui/reset';
+        var resetBase = global.ShenaConfig.oauthBase();
+        var resetUrl = global.ShenaConfig.isSafeHttpUrl(resetBase) ? resetBase + '/ui/reset' : '';
         global.Ui.openModal({
           title: t('profile.changePassword'),
           body: '<p>Password changes are performed in Kanidm\u2019s own credential-update UI so credentials never pass through Shenasa:</p>' +
-            '<p><a class="btn btn-primary" href="' + esc(resetUrl) + '" target="_blank" rel="noopener noreferrer">Open Kanidm credential reset</a></p>'
+            (resetUrl
+              ? '<p><a class="btn btn-primary" href="' + esc(resetUrl) + '" target="_blank" rel="noopener noreferrer">Open Kanidm credential reset</a></p>'
+              : '<p class="error-text">Configure a valid https API URL first.</p>')
         });
       });
     } catch (err) {
@@ -1872,6 +2536,9 @@
           <select class="input" id="f-theme" name="theme">${themeOptions}</select></div>
         ${global.Ui.fieldHtml({ name: 'idleTimeoutMin', type: 'number', label: t('settings.idleTimeout'), value: String(cfg.idleTimeoutMin != null ? cfg.idleTimeoutMin : 0), help: t('settings.idleTimeout.help'),
           input: '<input class="input" type="number" min="0" max="1440" step="1" name="idleTimeoutMin" value="' + esc(String(cfg.idleTimeoutMin != null ? cfg.idleTimeoutMin : 0)) + '" />' })}
+        ${global.Ui.fieldHtml({ name: 'locale', label: t('settings.locale'), value: cfg.locale || '', help: t('settings.locale.help'),
+          input: '<input class="input" type="text" name="locale" maxlength="20" value="' + esc(cfg.locale || '') + '" placeholder="en" />' })}
+        ${global.App && global.App.localePackError && global.App.localePackError() ? '<p class="error-text">' + esc(t('settings.locale.missing')) + ' (' + esc(global.App.localePackError().message) + ')</p>' : ''}
         <p class="muted">${esc(t('settings.note'))}</p>
       </form>`;
 
@@ -1899,10 +2566,16 @@
         oidcScope: form.querySelector('[name=oidcScope]').value.trim(),
         oidcRedirectUri: form.querySelector('[name=oidcRedirectUri]').value.trim(),
         theme: form.querySelector('[name=theme]').value,
-        idleTimeoutMin: form.querySelector('[name=idleTimeoutMin]').value.trim()
+        idleTimeoutMin: form.querySelector('[name=idleTimeoutMin]').value.trim(),
+        locale: form.querySelector('[name=locale]').value.trim()
       };
       if (!map.apiUrl) {
         global.Ui.toast('API URL is required.', 'error');
+        return;
+      }
+      if (!global.ShenaConfig.isSafeHttpUrl(map.apiUrl) ||
+          !global.ShenaConfig.isSafeHttpUrl(map.oidcRedirectUri)) {
+        global.Ui.toast('API URL and redirect URI must be https (http://localhost is allowed).', 'error');
         return;
       }
       var idleNum = parseFloat(map.idleTimeoutMin);
@@ -1918,6 +2591,10 @@
       // (Re)arm the idle watchdog with the new timeout.
       if (global.App && global.App.armIdleWatch) global.App.armIdleWatch();
       global.Ui.toast(t('settings.saved'), 'success');
+      // A locale change only takes effect at boot — reload so it applies.
+      if (map.locale !== (cfg.locale || '') && global.location && global.location.reload) {
+        global.location.reload();
+      }
     });
 
     root.querySelector('[data-settings-test]').addEventListener('click', async function () {
@@ -1967,6 +2644,361 @@
       global.Ui.toast(t('settings.saved'), 'success');
       global.location.reload();
     });
+
+    // ---- v1.3: Domain settings (domain_admins ONLY) -------------------------
+    // idm_acp_domain_admin receiver = UUID_DOMAIN_ADMINS (dl14/dl15
+    // access.rs) — idm_admins is NOT a member. Writable attrs verified:
+    // domain_display_name, domain_allow_account_recovery (PUT body is a
+    // bare Vec<String>, booleans as "true"/"false").
+    if (global.Store.canDomainAdmin && global.Store.canDomainAdmin()) {
+      try {
+        var dom = await global.Api.getDomain();
+        var curName = global.Api.attr(dom, 'domain_display_name') || '';
+        var curRecovery = String(global.Api.attr(dom, 'domain_allow_account_recovery') || '');
+        var domCard = card(t('settings.domain.title'),
+          '<form data-domain-form novalidate>' +
+          global.Ui.fieldHtml({ name: 'domainDisplayName', label: t('settings.domain.displayName'), value: curName }) +
+          '<label class="check"><input type="checkbox" name="allowRecovery"' + (curRecovery === 'true' ? ' checked' : '') + ' data-allow-recovery /> ' +
+          esc(t('settings.domain.allowRecovery')) + '</label>' +
+          '<p class="help">' + esc(t('settings.domain.allowRecovery.help')) + '</p>' +
+          '<div class="btn-row"><button class="btn btn-primary" data-domain-save>' + esc(t('common.save')) + '</button></div>' +
+          '</form>');
+        root.insertAdjacentHTML('beforeend', domCard);
+
+        root.querySelector('[data-domain-save]').addEventListener('click', async function () {
+          var dForm = root.querySelector('[data-domain-form]');
+          var newName = dForm.querySelector('[name=domainDisplayName]').value.trim();
+          var newRecovery = dForm.querySelector('[data-allow-recovery]').checked ? 'true' : 'false';
+          var check = global.Validation.domainSettingsForm({ domainDisplayName: newName });
+          if (!check.ok) { global.Ui.showFieldErrors(dForm, check.errors); return; }
+          try {
+            if (newName !== curName) await global.Api.putDomainAttr('domain_display_name', [newName]);
+            if (newRecovery !== curRecovery) await global.Api.putDomainAttr('domain_allow_account_recovery', [newRecovery]);
+            curName = newName; curRecovery = newRecovery;
+            global.Ui.toast(t('settings.domain.saved'), 'success');
+          } catch (err) {
+            global.Ui.handleError(err, 'domain');
+          }
+        });
+      } catch (err) {
+        // Domain read denied even to domain_admins lookups — silently omit
+        // the card (same pattern as the dashboard domain stat).
+      }
+    }
+  };
+
+
+  // ======================================================================
+  // Governance reports (all client-side over live API reads)
+  // ======================================================================
+  var reportsState = { people: null, groups: null };
+
+  async function reportsData() {
+    if (!reportsState.people) {
+      var results = await Promise.all([global.Api.listPeople(), global.Api.listGroups()]);
+      reportsState.people = results[0] || [];
+      reportsState.groups = results[1] || [];
+    }
+    return reportsState;
+  }
+
+  // Pure helpers (exposed for tests via ShenaReports).
+  function parseGroupExport(json, fileName) {
+    var data = typeof json === 'string' ? JSON.parse(json) : json;
+    var arr = data && data.groups ? data.groups : (Array.isArray(data) ? data : null);
+    if (!arr) throw new Error(t('reports.diff.badFile', { file: fileName || 'file' }));
+    var out = {};
+    for (var i = 0; i < arr.length; i++) {
+      var g = arr[i] || {};
+      var name = g.name || (g.attrs && global.Api.attr(g, 'name')) || '';
+      if (!name) continue;
+      var members = g.members || (g.attrs ? global.Api.attrs(g, 'member') : []) || [];
+      var set = {};
+      for (var m = 0; m < members.length; m++) set[global.Store.stripDomain(String(members[m]))] = true;
+      out[name] = set;
+    }
+    return out;
+  }
+
+  function diffGroupExports(oldExp, newExp) {
+    var rows = [];
+    var names = {};
+    var n;
+    for (n in oldExp) names[n] = true;
+    for (n in newExp) names[n] = true;
+    for (n in names) {
+      if (!Object.prototype.hasOwnProperty.call(names, n)) continue;
+      var added = [], removed = [];
+      var o = oldExp[n] || {};
+      var w = newExp[n] || {};
+      var m;
+      for (m in w) if (Object.prototype.hasOwnProperty.call(w, m) && !o[m]) added.push(m);
+      for (m in o) if (Object.prototype.hasOwnProperty.call(o, m) && !w[m]) removed.push(m);
+      var note = '';
+      if (!oldExp[n]) note = 'reports.diff.groupOnlyNew';
+      else if (!newExp[n]) note = 'reports.diff.groupOnlyOld';
+      if (added.length || removed.length || note) {
+        rows.push({ group: n, added: added.sort(), removed: removed.sort(), note: note });
+      }
+    }
+    rows.sort(function (a, b) { return a.group.localeCompare(b.group); });
+    return rows;
+  }
+
+  // Credential-status classification per the serde enum in
+  // proto/src/internal/credupdate.rs: "Password" / "GeneratedPassword" /
+  // { "Passkey": [...] } / { "PasswordMfa": [...] }.
+  function credClass(credStatus) {
+    var creds = credStatus && credStatus.creds ? credStatus.creds : [];
+    if (!creds.length) return 'none';
+    var passkeys = 0;
+    for (var i = 0; i < creds.length; i++) {
+      var ty = creds[i] && creds[i].type_;
+      if (ty === 'Passkey' || (ty && typeof ty === 'object' && Object.prototype.hasOwnProperty.call(ty, 'Passkey'))) passkeys++;
+    }
+    if (passkeys === creds.length) return 'passkeyOnly';
+    return passkeys > 0 ? 'withPasskey' : 'noPasskey';
+  }
+
+  Pages.reports = async function (root) {
+    reportsState.people = null;
+    root.innerHTML = '<h1 class="page-title">' + esc(t('reports.title')) + '</h1>' +
+      '<p class="muted">' + esc(t('reports.help')) + '</p>' +
+      '<div class="grid-2">' +
+      card(t('reports.expiring.title'), html`
+        <div class="report-controls">
+          ${global.Ui.fieldHtml({ name: 'expDays', label: t('reports.expiring.days'), type: 'number', value: '30' })}
+          <button class="btn btn-primary" data-exp-run>${esc(t('reports.expiring.run'))}</button>
+          <button class="btn" data-exp-csv disabled>${esc(t('reports.expiring.export'))}</button>
+        </div>
+        <div data-exp-out></div>`) +
+      card(t('reports.diff.title'), html`
+        <p class="help">${esc(t('reports.diff.help'))}</p>
+        ${global.Ui.fieldHtml({ name: 'diffOld', label: t('reports.diff.old'), input: '<input class="input" type="file" name="diffOld" accept=".json,application/json"/>' })}
+        ${global.Ui.fieldHtml({ name: 'diffNew', label: t('reports.diff.new'), input: '<input class="input" type="file" name="diffNew" accept=".json,application/json"/>' })}
+        <div class="btn-row"><button class="btn btn-primary" data-diff-run>${esc(t('reports.diff.run'))}</button></div>
+        <div data-diff-out></div>`) +
+      '</div>' +
+      card(t('reports.passkey.title'), html`
+        <p class="help">${esc(t('reports.passkey.help'))}</p>
+        <div class="report-controls">
+          <select class="input" data-pk-group aria-label="${esc(t('reports.passkey.group'))}"><option value="">—</option></select>
+          <button class="btn btn-primary" data-pk-run>${esc(t('reports.passkey.run'))}</button>
+          <span class="muted" data-pk-progress></span>
+        </div>
+        <div data-pk-out></div>`);
+
+    function readFileText(input) {
+      return new Promise(function (resolve, reject) {
+        var f = input.files && input.files[0];
+        if (!f) { reject(new Error('no file')); return; }
+        var reader = new global.FileReader();
+        reader.onload = function () { resolve(String(reader.result || '')); };
+        reader.onerror = function () { reject(new Error('read error')); };
+        reader.readAsText(f);
+      });
+    }
+
+    // ---- Accounts expiring within N days --------------------------------
+    var lastExpiring = [];
+    root.querySelector('[data-exp-run]').addEventListener('click', async function () {
+      var out = root.querySelector('[data-exp-out]');
+      var days = parseInt(root.querySelector('[name=expDays]').value, 10);
+      if (!isFinite(days) || days < 0 || days > 3650) days = 30;
+      out.innerHTML = global.Ui.spinner();
+      try {
+        var data = await reportsData();
+        var now = Date.now();
+        lastExpiring = [];
+        for (var i = 0; i < data.people.length; i++) {
+          var p = data.people[i];
+          var exp = global.Api.attr(p, 'account_expire');
+          if (!exp) continue;
+          var ms = Date.parse(String(exp));
+          if (isNaN(ms)) continue;
+          var daysLeft = Math.ceil((ms - now) / 86400000);
+          if (daysLeft > days) continue;
+          lastExpiring.push({ name: global.Api.attr(p, 'name') || '', expires: String(exp), daysLeft: daysLeft });
+        }
+        lastExpiring.sort(function (a, b) { return a.daysLeft - b.daysLeft; });
+        if (!lastExpiring.length) {
+          out.innerHTML = '<p class="muted">' + esc(t('reports.expiring.none', { n: days })) + '</p>';
+        } else {
+          var rowsH = '';
+          for (var r = 0; r < lastExpiring.length; r++) {
+            var e = lastExpiring[r];
+            rowsH += '<tr><td><a class="link" href="#/users/' + encodeURIComponent(e.name) + '">' + esc(e.name) + '</a></td>' +
+              '<td>' + esc(global.Ui.formatDate(e.expires)) + '</td>' +
+              '<td>' + (e.daysLeft < 0 ? '<span class="chip chip-danger">' + esc(t('reports.expired')) + '</span>'
+                : esc(String(e.daysLeft))) + '</td></tr>';
+          }
+          out.innerHTML = '<table class="table"><thead><tr>' +
+            '<th scope="col">' + esc(t('reports.expiring.col.name')) + '</th>' +
+            '<th scope="col">' + esc(t('reports.expiring.col.expires')) + '</th>' +
+            '<th scope="col">' + esc(t('reports.expiring.col.daysLeft')) + '</th></tr></thead><tbody>' +
+            rowsH + '</tbody></table>';
+        }
+        root.querySelector('[data-exp-csv]').disabled = lastExpiring.length === 0;
+      } catch (err) {
+        out.innerHTML = '';
+        global.Ui.handleError(err, 'people');
+      }
+    });
+    root.querySelector('[data-exp-csv]').addEventListener('click', function () {
+      if (!lastExpiring.length) return;
+      var lines = ['name,expires,days_left'];
+      function csvCell(v) {
+        v = String(v == null ? '' : v);
+        if (/^[=+\-@\t\r]/.test(v)) v = "'" + v;
+        return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+      }
+      for (var i = 0; i < lastExpiring.length; i++) {
+        var e = lastExpiring[i];
+        lines.push(csvCell(e.name) + ',' + csvCell(global.Ui.formatDate(e.expires)) + ',' + csvCell(e.daysLeft));
+      }
+      global.Ui.download('shenasa-expiring.csv', lines.join('\n'), 'text/csv');
+    });
+
+    // ---- Passkey-only adoption per group --------------------------------
+    var pkSel = root.querySelector('[data-pk-group]');
+    try {
+      var d0 = await reportsData();
+      var gnames = [];
+      for (var gi = 0; gi < d0.groups.length; gi++) {
+        var gnm = global.Api.attr(d0.groups[gi], 'name') || '';
+        if (gnm) gnames.push(gnm);
+      }
+      gnames.sort();
+      for (var go = 0; go < gnames.length; go++) {
+        var opt = global.document.createElement('option');
+        opt.value = gnames[go]; opt.textContent = gnames[go];
+        pkSel.appendChild(opt);
+      }
+    } catch (e) { /* group list stays empty; Run will surface the error */ }
+
+    root.querySelector('[data-pk-run]').addEventListener('click', async function () {
+      var groupName = pkSel.value;
+      if (!groupName) return;
+      var out = root.querySelector('[data-pk-out]');
+      var prog = root.querySelector('[data-pk-progress]');
+      var run = root.querySelector('[data-pk-run]');
+      run.disabled = true;
+      out.innerHTML = global.Ui.spinner();
+      try {
+        var data = await reportsData();
+        var grp = null;
+        for (var i = 0; i < data.groups.length; i++) {
+          if ((global.Api.attr(data.groups[i], 'name') || '') === groupName) { grp = data.groups[i]; break; }
+        }
+        if (!grp) throw new Error('group not found');
+        var peopleSet = {};
+        for (i = 0; i < data.people.length; i++) {
+          var pn = global.Api.attr(data.people[i], 'name') || '';
+          if (pn) peopleSet[pn] = true;
+        }
+        var members = global.Api.attrs(grp, 'member').map(global.Store.stripDomain);
+        var persons = [], nonPerson = 0;
+        for (i = 0; i < members.length; i++) {
+          if (peopleSet[members[i]]) persons.push(members[i]); else nonPerson++;
+        }
+        var stats = { passkeyOnly: 0, withPasskey: 0, noPasskey: 0, none: 0, restricted: 0 };
+        var perRow = [];
+        var done = 0;
+        prog.textContent = t('reports.passkey.progress', { done: 0, total: persons.length });
+        // Bounded-concurrency fan-out (4 at a time) — one credential-status
+        // read per person, exactly as the roadmap scoped this report.
+        var idx = 0;
+        async function worker() {
+          while (idx < persons.length) {
+            var my = idx++;
+            var name = persons[my];
+            try {
+              var st = await global.Api.getCredentialStatus(name);
+              var cls = credClass(st);
+              stats[cls]++;
+              perRow.push({ name: name, cls: cls });
+            } catch (err) {
+              if (err && err.status === 403) {
+                stats.restricted++;
+                perRow.push({ name: name, cls: 'restricted' });
+              } else {
+                throw err;
+              }
+            }
+            done++;
+            prog.textContent = t('reports.passkey.progress', { done: done, total: persons.length });
+          }
+        }
+        await Promise.all([worker(), worker(), worker(), worker()]);
+        perRow.sort(function (a, b) { return a.name.localeCompare(b.name); });
+        var statKeys = ['passkeyOnly', 'withPasskey', 'noPasskey', 'none', 'restricted'];
+        var chips = '';
+        for (var sk = 0; sk < statKeys.length; sk++) {
+          chips += '<span class="chip chip-stat">' + esc(t('reports.passkey.stat.' + statKeys[sk])) +
+            ': <strong>' + stats[statKeys[sk]] + '</strong></span> ';
+        }
+        var rowsH = '';
+        for (var pr = 0; pr < perRow.length; pr++) {
+          rowsH += '<tr><td><a class="link" href="#/users/' + encodeURIComponent(perRow[pr].name) + '">' +
+            esc(perRow[pr].name) + '</a></td>' +
+            '<td>' + esc(t('reports.passkey.stat.' + perRow[pr].cls)) + '</td></tr>';
+        }
+        out.innerHTML = '<p class="muted">' + esc(t('reports.passkey.persons', { n: persons.length })) +
+          (nonPerson ? ' ' + esc(t('reports.passkey.nonPerson', { n: nonPerson })) : '') + '</p>' +
+          '<div class="chip-row">' + chips + '</div>' +
+          (rowsH ? '<table class="table"><thead><tr><th scope="col">' + esc(t('gimport.col.member')) + '</th>' +
+            '<th scope="col">' + esc(t('reports.passkey.col.class')) + '</th></tr></thead><tbody>' +
+            rowsH + '</tbody></table>' : '');
+        prog.textContent = '';
+      } catch (err) {
+        out.innerHTML = '';
+        prog.textContent = '';
+        global.Ui.handleError(err, 'people');
+      } finally {
+        run.disabled = false;
+      }
+    });
+
+    // ---- Membership diff of two exports ---------------------------------
+    root.querySelector('[data-diff-run]').addEventListener('click', async function () {
+      var out = root.querySelector('[data-diff-out]');
+      out.innerHTML = '';
+      try {
+        var oldIn = root.querySelector('[name=diffOld]');
+        var newIn = root.querySelector('[name=diffNew]');
+        var oldTxt = await readFileText(oldIn);
+        var newTxt = await readFileText(newIn);
+        var rows = diffGroupExports(
+          parseGroupExport(oldTxt, oldIn.files[0].name),
+          parseGroupExport(newTxt, newIn.files[0].name));
+        if (!rows.length) {
+          out.innerHTML = '<p class="muted">' + esc(t('reports.diff.noChanges')) + '</p>';
+          return;
+        }
+        var rowsH = '';
+        for (var i = 0; i < rows.length; i++) {
+          var r = rows[i];
+          rowsH += '<tr><td>' + esc(r.group) +
+            (r.note ? ' <span class="muted">(' + esc(t(r.note)) + ')</span>' : '') + '</td>' +
+            '<td>' + esc(r.added.join(', ') || '—') + '</td>' +
+            '<td>' + esc(r.removed.join(', ') || '—') + '</td></tr>';
+        }
+        out.innerHTML = '<table class="table"><thead><tr><th scope="col">' + esc(t('reports.diff.col.group')) + '</th>' +
+          '<th scope="col">' + esc(t('reports.diff.col.added')) + '</th>' +
+          '<th scope="col">' + esc(t('reports.diff.col.removed')) + '</th></tr></thead><tbody>' +
+          rowsH + '</tbody></table>';
+      } catch (err) {
+        global.Ui.toast(err && err.message ? err.message : String(err), 'error');
+      }
+    });
+  };
+
+  // Pure helpers, exported for the self-test suite (and embedders).
+  global.ShenaReports = {
+    parseGroupExport: parseGroupExport,
+    diffGroupExports: diffGroupExports,
+    credClass: credClass,
+    membershipImportPlan: membershipImportPlan
   };
 
   global.Pages = Pages;

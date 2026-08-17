@@ -121,6 +121,18 @@
       return run(data, rules);
     },
 
+    // Domain settings: only the display name is free text (empty = leave
+    // unset); the recovery toggle is a checkbox.
+    domainSettingsForm: function (data) {
+      var rules = {
+        domainDisplayName: function (v) {
+          if (v == null || v === '') return res(true);
+          return displayName(v);
+        }
+      };
+      return run(data, rules);
+    },
+
     // Absolute https URL — Kanidm requires https redirect/landing URLs for
     // OAuth2 clients (http is only ever allowed for localhost dev clients
     // with an explicit opt-in attribute, which Shenasa does not expose).
@@ -131,6 +143,19 @@
       // SERVER re-validates authoritatively — this just catches typos.
       if (!/^https:\/\/[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?(\/[^\s]*)?$/.test(v.trim())) {
         return res(false, label + ' must be a valid absolute https:// URL (e.g. https://app.example.com/callback) — plain http is not accepted by Kanidm here.');
+      }
+      return res(true);
+    },
+
+    // API / OIDC connection URLs: https anywhere, http only to loopback.
+    // Rejects javascript:, data:, file: and remote http so a Settings (or
+    // ?apiUrl=) value cannot become an XSS or mixed-content sink.
+    serviceUrl: function (v, label) {
+      label = label || 'URL';
+      if (typeof v !== 'string' || v.trim() === '') return res(false, label + ' is required.');
+      var checker = global.ShenaConfig && global.ShenaConfig.isSafeHttpUrl;
+      if (checker ? !checker(v.trim()) : !/^https:\/\//i.test(v.trim())) {
+        return res(false, label + ' must be an https:// URL (http://localhost is allowed for local development).');
       }
       return res(true);
     },
@@ -148,8 +173,9 @@
       return res(true);
     },
 
-    // OAuth2 client create/edit form. Landing URL required (Kanidm builds
-    // the origin list from it); managed-by optional group name.
+    // OAuth2 client create/edit form. Landing URL required (https).
+    // Kanidm does NOT derive oauth2_rs_origin from landing — the UI
+    // PATCHes that attribute after create.
     oauthClientForm: function (data, opts) {
       opts = opts || {};
       var rules = {

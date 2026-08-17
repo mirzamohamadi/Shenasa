@@ -50,15 +50,23 @@ If the issue is in **Kanidm itself**, report it upstream via
 - **XSS**: all user-provided values are escaped with `Ui.esc()` before
   insertion into HTML; smoke tests assert injected markup stays inert.
 - **CSP & headers**: `script-src 'self'` (no inline JavaScript),
-  `style-src 'self' 'unsafe-inline'`, `img-src 'self' data:`,
-  `connect-src 'self' https:`, `object-src 'none'`, `frame-ancestors
-  'none'`, `base-uri 'self'`, `form-action 'self'`; proxies add HSTS,
+  `style-src 'self'` (**no `unsafe-inline` since v1.3**), `img-src 'self'
+  data:`, `connect-src 'self' https:`, `object-src 'none'`,
+  `frame-ancestors 'none'`, `base-uri 'self'`, `form-action 'self'`;
+  proxies add HSTS,
   `X-Content-Type-Options`, `X-Frame-Options DENY`, `Referrer-Policy
   no-referrer`, and a restrictive `Permissions-Policy`.
+- **Connection URLs**: `apiUrl` and `oidcRedirectUri` (query,
+  localStorage, Settings, login rescue) accept only `https://` or
+  loopback `http://localhost` / `127.0.0.1` / `[::1]`. `javascript:`,
+  `data:`, `file:` and remote `http://` are dropped so they cannot
+  become `location.assign` / `<a href>` sinks (v1.3.0).
 - **TLS**: enforced end-to-end; deployment configs never disable
   certificate verification (enforced by tests/CI). The dev-only CA in
   `deploy/setup.sh` is for evaluation and is replaced with real
   certificates for production.
+- **Dev server**: `scripts/serve.js` rejects `..`, malformed percent-
+  encoding, and hidden path segments (`.git`, `.env`, …).
 - **Dependencies**: zero runtime dependencies; the only dev dependency is
   jsdom (tests). CI runs `npm audit`.
 
@@ -76,4 +84,4 @@ If the issue is in **Kanidm itself**, report it upstream via
    the built-in admin UI break-glass flow.
 4. Review role-group membership (`idm_*`) regularly; grant least privilege.
 5. Subscribe to Kanidm security advisories and keep the server updated.
-6. Run `npm run check` and `sh test/integration.sh` before upgrades.
+6. Run `npm run check` and `bash test/integration.sh` before upgrades.

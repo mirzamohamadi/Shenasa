@@ -4,6 +4,158 @@ All notable changes to Shenasa are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] - 2026-08-17
+
+Public tag after v1.1.0. Ships the roadmap's **v1.2 "Operations at scale"**
+and **v1.3 "Deeper lifecycle"** as ONE release (the v1.2 tag is skipped).
+Includes the Apps create/hardening work that never shipped as a separate
+patch. 71/71 self-tests.
+
+### Security
+
+- **Connection URL allow-list**: `apiUrl` and `oidcRedirectUri` (query, localStorage, Settings, login rescue) now accept only `https://…` or loopback `http://localhost` / `127.0.0.1` / `[::1]`. `javascript:`, `data:`, `file:` and remote `http://` values are dropped so they cannot become `location.assign` / `<a href>` sinks.
+- SSO start, server logout navigation, the recovery/reset deep-links and the credential-manager `window.open` all refuse a non-allow-listed origin.
+- **Dev server path lock-down**: `scripts/serve.js` rejects `..` escape, malformed percent-encoding, and any path segment that is `.git` or otherwise hidden (`.env`, …).
+
+### Fixed
+
+- Reports → expiring-accounts CSV joined rows with a literal `\\n` instead of a newline, so the download was one long line. It now emits real newlines and applies the same spreadsheet formula-injection guard as the users export.
+- Clearing a person's email is no longer a silent no-op: `updatePerson` sends Kanidm's empty-array purge form.
+- Malformed `%` sequences in the query string or in a hash route no longer crash boot / the router.
+- User and group CSV imports are capped at 2000 data rows so a huge file cannot freeze the tab.
+- Service-account **Issue API token** dialog showed raw JavaScript (`' + esc(t(…)) + '`) instead of the two option labels, because a `html\`…\`` template mixed in string-concat. The checkboxes now read **Read-write (unchecked = read-only)** and **Shorter token string**, each with a one-line explanation of what ticking them does.
+- Apps **New client** dropdown (public / basic) did not change any help text, so it looked dead. The fields are supposed to stay the same — Kanidm never accepts a secret on `POST /v1/oauth2/_basic` — but the live note now says so, and after Save a basic client the generated secret is shown once (same modal as **Reveal basic secret**).
+- Creating a client left the URL on `#/apps` and never wrote `oauth2_rs_origin`. With `oauth2_strict_redirect_uri=true` (the create default), SSO then rejected the callback until an operator added the landing URL by hand. Create now PATCHes that origin and navigates to `#/apps/{id}`.
+
+
+
+### Added (deeper lifecycle)
+
+- **Per-user credential status card** (user page) — real server truth
+  from `GET /v1/person/{id}/_credential/_status` (verified
+  `server/core/src/https/v1.rs:1541` +
+  `proto/src/internal/credupdate.rs`; identical in v1.10.5/v1.11.0):
+  types rendered exactly per the serde enum — Password /
+  GeneratedPassword / Passkey (with enrolment labels) / PasswordMfa (TOTP
+  labels, legacy security-key labels, backup-code count) — plus the
+  credential UUID, an honest empty state (the server answers 200
+  `{creds:[]}` when nothing is set), and a 403-tolerant "restricted"
+  note for callers without the credential-reset ACPs. Secrets are never
+  touched.
+- **Onboarding wizard** (Users page): person → baseline groups →
+  first-sign-in link with QR hand-off in one guided modal, composing
+  only already-verified endpoints (person create, `_attr/member`,
+  credential intent). `idm_*` role groups are deliberately excluded from
+  the baseline list.
+- **Domain settings editor** (Settings page, gated to `domain_admins` —
+  the receiver of `idm_acp_domain_admin`; upstream nests `system_admins`,
+  NOT `idm_admins`, into that group): domain display name and the
+  **account-recovery toggle**, written via `PUT /v1/domain/_attr/{attr}`
+  with bare-array bodies and booleans as `"true"/"false"` (verified
+  `v1.rs:2499-2600`, `libs/client/src/domain.rs`).
+- **Honest account-recovery UX**: upstream verification proved **no admin
+  "send recovery email" REST surface exists** — recovery is user
+  self-service at `/ui/recover`. Instead of a fake button, the user page
+  links to the real recovery page and the domain toggle above controls
+  availability (ROADMAP amended to record the finding).
+
+
+### Added (operations at scale)
+
+- **Bulk user actions with mandatory dry-run** (Users page): checkbox
+  column (row + select-all-filtered, selection survives pagination), a
+  bulk bar, and two dry-run-first operations —
+  - *Add to group*: reads the target group, splits the selection into
+    adds vs already-members, then applies with **ONE batched request** —
+    `POST /v1/group/{id}/_attr/member` takes a `Vec<String>` of members
+    (verified `group_id_attr_post`, `server/core/src/https/v1.rs`;
+    identical in 1.10.5/1.11.0). `idm_*` role groups are deliberately
+    excluded from bulk assignment (RBAC changes stay per-group).
+  - *Set / clear expiry*: per-user table current→new; unchanged rows are
+    skipped server-side-free. Clear sends an **empty array**, which is
+    precisely Kanidm's attribute-purge form — PATCH semantics are
+    purge-then-present per attribute (`ModifyList::from_patch`,
+    `server/lib/src/modify.rs:149`), and `idm_acp_people_manage` lists
+    `AccountExpire`/`AccountValidFrom` in BOTH `modify_present_attrs` and
+    `modify_removed_attrs` (dl14 + dl15). Values are RFC3339
+    (`OffsetDateTime::parse`, `valueset/datetime.rs`). Both flows are
+    mirrored in the CI integration suite against the real server: batched
+    member POST, expiry PATCH, empty-array purge CLEAR, and the
+    credential-status read.
+- **Group-membership CSV import with dry-run report** (Groups page):
+  `group,member,action` rows (action optional: add/remove) are classified
+  against live server state as add / remove / no-op (already member, not
+  a member) / conflict (unknown group, unknown member, bad action) with
+  per-row reasons BEFORE anything is written; applying batches effective
+  changes to one request per (group, action) via the verified
+  `_attr/member` POST/DELETE.
+- **Governance reports** (`#/reports`, people-managers) — all client-side
+  over live reads, nothing stored server-side:
+  - *Accounts expiring within N days* (+ CSV export) from
+    `account_expire`.
+  - *Passkey-only adoption per group*: bounded (4×) fan-out of
+    `_credential/_status` per person member, 403-tolerant
+    (restricted counted separately), classes per the serde enum
+    (`proto/src/internal/credupdate.rs`) including the unit `Passkey` and
+    `PasswordMfa` forms; nested-group members reported as skipped.
+  - *Membership diff* of two group-JSON exports — files parsed locally,
+    never uploaded.
+- **Canonical group JSON export** (Groups page) —
+  `{format, version, generatedAt, groups:[{name, members}]}`; the input
+  format of the diff report.
+- **Optional community locale packs**: `locales/<code>.json` (strict
+  code-shape allowlist, flat `{key: string}`, merged over the English
+  table with unknown keys/non-strings ignored) loaded at boot when the
+  new `locale` config is set; the audited core stays English-only and the
+  English-only guard test still passes. Settings shows a note when a pack
+  fails to load. See `locales/README.md`.
+- **k6 load-test package** (`docs/load-test/`): SSO-burst script
+  (`/v1/self` + `/v1/person` constant-arrival-rate) with interactive
+  budgets as k6 thresholds, plus method and sizing guidance; the results
+  table is deliberately blank for operators to fill on their hardware.
+- **Release automation**: tag-pushed `release.yml` runs the full test
+  gate, builds `shenasa-admin-<tag>.zip` (+`.sha256`) and attaches it to
+  the GitHub Release, and publishes `ghcr.io/<owner>/shenasa-ui` with
+  semver tags. The CI integration suite now runs against **both**
+  `kanidm/server:1.10.5` and `:1.11.0` on every commit (matrix).
+
+### Changed
+
+- **Performance: in-flight GET de-duplication** — concurrent identical
+  GETs (rapid navigation, widgets loading the same lists) share one
+  underlying fetch; the entry is cleared as the request settles, so
+  nothing is cached beyond the flight window (no stale reads, no
+  cross-user privacy surface).
+- **CSP tightening (roadmap v1.2)**: `style-src` drops `'unsafe-inline'`
+  everywhere — the meta CSP, the `setup.sh`-generated Caddyfile,
+  `Caddyfile.example`, `Caddyfile.ui` and both nginx examples now serve
+  `style-src 'self'`. The last inline styles were eliminated (chart
+  legend swatches are inline-SVG `fill` attributes — presentation
+  attributes are not inline styles — and the noscript notice is a CSS
+  class). Guard tests fail on `style=` attributes, `setAttribute('style')`
+  and `cssText` in any JS module. `script-src 'self'` unchanged.
+- **Accessibility (WCAG 2.2 AA pass)**: skip-to-content link,
+  `aria-current="page"` on the active nav item, labelled select-all/row
+  checkboxes (`users.select.all/row`), `scope="col"` on all new report
+  tables, the focus-visible ring kept across new controls (bulk bar,
+  report controls); toasts remain `aria-live` and dialogs `aria-modal`
+  with focus management + Escape (pre-existing, re-verified).
+
+### Fixed
+
+- **Blank page at `https://<domain>/admin` (no trailing slash)** on
+  single-origin deployments generated by `deploy/setup.sh`: the SPA uses
+  relative asset paths, so at `/admin` they resolve to `/css/…` and
+  `/js/…` at the site root, fall through to the Kanidm reverse proxy,
+  and come back as 404 `text/plain` — which browsers then refuse to
+  execute (strict MIME checking) or apply as a stylesheet. The example
+  configs already carried the fix; the *generated* Caddyfile did not.
+  `setup.sh` now emits `redir /admin /admin/ 308` (matching
+  `deploy/Caddyfile.example` and the nginx examples' `return 301`), and
+  a regression test requires the redirect in every single-origin config
+  and forbids serving the SPA on the exact `/admin` path.
+
+
 ## [1.1.0] - 2026-08-07
 
 **v1.1.0 — "Applications & service accounts"** (`docs/ROADMAP.md`). A
@@ -424,6 +576,7 @@ Initial development snapshot (pre-public; never tagged).
 - Documentation: README, deploy two-phase guide, SECURITY, CONTRIBUTING,
   OpenAPI reference, go-live checklist, MIT license.
 
-[Unreleased]: https://github.com/mirzamohamadi/shenasa/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/mirzamohamadi/shenasa/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/mirzamohamadi/shenasa/compare/v1.1.0...v1.3.0
 [1.1.0]: https://github.com/mirzamohamadi/shenasa/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/mirzamohamadi/shenasa/releases/tag/v1.0.0

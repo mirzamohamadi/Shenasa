@@ -212,6 +212,13 @@
     // (builtin ACPs idm_acp_service_account_{create,manage,delete}).
     canManageServiceAccounts: function () {
       return Store.hasAnyRole(['idm_service_account_admins']);
+    },
+    // Domain settings (display name, recovery toggle, …): domain_admins.
+    // idm_acp_domain_admin receiver = UUID_DOMAIN_ADMINS; the group's
+    // members are UUID_SYSTEM_ADMINS — idm_admins is NOT included
+    // (dl14/dl15 access.rs + groups.rs).
+    canDomainAdmin: function () {
+      return Store.hasAnyRole(['domain_admins']);
     }
   };
 

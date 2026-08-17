@@ -25,9 +25,22 @@ source tree of the target release — routes
   idle sign-out, QR service-desk flows, CSV import/export, hardened
   deploy layer, 40/40 self-tests.
 
-## Next — v1.0.x patches
+## Shipped — v1.3.0 (2026-08-17)
 
-- Field feedback from the first public deployments; a11y/wording polish.
+Public tag after v1.1.0. Includes operations-at-scale, lifecycle depth,
+and the Apps create/hardening work.
+
+- Connection URL allow-list; dev-server path lock-down.
+- Apps create: live type note, auto `oauth2_rs_origin` PATCH, hash to
+  `#/apps/{id}`, one-shot secret modal after basic create.
+- Service-account token dialog labels; report CSV newlines; mail purge;
+  CSV row cap; malformed-`%` routes.
+- Operator docs: `docs/USER-GUIDE.md` rewritten for every page;
+  `docs/APPS.md` added.
+
+## Next — patches after v1.3.0
+
+- Field feedback from the first v1.3.0 deployments; a11y/wording polish.
 - Track upstream 1.10.x/1.11.x patch releases; re-verify the matrix on
   each and extend `SUPPORTED_KANIDM` accordingly.
 
@@ -58,38 +71,61 @@ for organisations running dozens of SSO apps.
 
 ## v1.2 — "Operations at scale"
 
-Aimed at ~2000-user / ~50-app deployments.
+✅ **Status: shipped inside v1.3.0 (2026-08-08)** — the v1.2 tag itself was
+skipped by product decision; every item below landed in the combined
+release. Aimed at ~2000-user / ~50-app deployments.
 
-- **Bulk operations**: group membership CSV import (dry-run report showing
-  adds/removes/conflicts before applying), multi-select user actions
-  (add-to-group, set expiry), export-*filtered*-views.
-- **Governance reports**: accounts expiring within N days, passkey-only
-  adoption per group, role-group membership diff since last export
-  (client-side diffing of two exports — no new server API needed).
-- **Performance**: virtualised/paginated list rendering proven at 5k+
-  entries, request de-duplication on rapid navigation, measurable
-  interaction budget on the dashboard.
-- **CSP tightening**: eliminate `'unsafe-inline'` from `style-src` (move to
-  fully external CSS), keeping `script-src 'self'` as-is.
-- **Optional community language packs** loaded as *external* JSON locale
-  files; the audited core stays English-only (the English-only source
-  guard test keeps passing — packs are data, not code).
-- Accessibility: WCAG 2.2 AA audit of focus order, contrast and ARIA.
+- **Bulk operations** ✅ — group membership CSV import (dry-run report
+  with adds/removes/no-ops/conflicts + per-row reasons, batched apply),
+  multi-select user actions (dry-run-first add-to-group, set/clear expiry
+  with purge-semantics clear), export-*filtered*-views (already present
+  since v1.0: CSV/JSON of the current Users filter; v1.3 adds the
+  expiring-report CSV and the group JSON export).
+- **Governance reports** ✅ — accounts expiring within N days,
+  passkey-only adoption per group (bounded fan-out of `_credential/_status`,
+  403-tolerant), membership diff of two exports (fully client-side).
+- **Performance** ✅ — in-flight GET de-duplication; windowed/paginated
+  rendering proven at 5k+ entries (self-test: 5004 people → 15 DOM rows,
+  334 pages); the dashboard interaction budget is expressed as k6
+  thresholds in `docs/load-test/`.
+- **CSP tightening** ✅ — `'unsafe-inline'` eliminated from `style-src`
+  everywhere (meta + all deploy configs); `script-src 'self'` unchanged;
+  guard tests scan every JS module for inline-style patterns.
+- **Optional community language packs** ✅ — `locales/<code>.json`
+  merged over the English core with a strict allowlist; core stays
+  English-only (guard unchanged).
+- **Accessibility** ✅ — WCAG 2.2 AA pass: skip link, `aria-current`,
+  labelled selection controls, `scope="col"` tables, focus ring preserved
+  across new controls.
+- **k6 load-test report** ✅ (script + method in `docs/load-test/`;
+  results table filled on first operator run).
 
 ## v1.3 — "Deeper lifecycle"
 
-- **Per-user credential status**: `/v1/person/{id}/_credential/_status`
-  (exists today) — show passkeys (named), TOTP presence, credential-type
-  minimum, without ever touching secrets.
-- **Account recovery (admin-triggered)**: Kanidm 1.10 added email-based
-  recovery — verify the exact REST surface in the target release first,
-  then surface "send recovery email" next to the reset-intent QR flow.
-- **Onboarding wizard**: person → baseline groups → reset link in one
-  guided flow (composes existing endpoints; nothing fake).
-- **Domain settings editor** (`/v1/domain/_attr/{attr}`): display name and
-  image management for admins with the matching ACP.
-- **k6 load-test report** published in docs: SSO token-fetch bursts for 50
-  apps, sizing guidance validated on 1.10/1.11.
+✅ **Status: shipped as v1.3.0 (2026-08-08), together with v1.2.**
+By product decision the v1.2 tag is skipped; both milestones landed in
+v1.3.0.
+
+- **Per-user credential status** ✅ implemented — real
+  `GET /v1/person/{id}/_credential/_status` (types + labels + UUID,
+  403-tolerant; never touches secrets).
+- **Account recovery (admin-triggered)** — ⚠️ amended after upstream
+  verification: **no admin "send recovery email" REST surface exists**
+  (recovery is user self-service at `/ui/recover`). Shipped honestly
+  instead: recovery page link on the user page + the
+  `domain_allow_account_recovery` toggle in the domain editor.
+- **Onboarding wizard** ✅ implemented — person → baseline groups →
+  reset link (composes existing verified endpoints; nothing fake).
+- **Domain settings editor** ✅ implemented — display name + recovery
+  toggle via `/v1/domain/_attr/{attr}` (domain_admins role; `_image`
+  upload stays deferred).
+- **k6 load-test report** ✅ published in `docs/load-test/` (script +
+  method + sizing guidance; results attached on first operator run).
+- **CI server matrix** ✅ — integration suite runs against both
+  `kanidm/server:1.10.5` and `:1.11.0` (from the v1.1 leftovers).
+- **Release automation** ✅ — `release.yml` attaches
+  `shenasa-admin-<tag>.zip` + `.sha256` to every tag release and publishes
+  the UI image to GHCR with semver tags (from the v1.1 leftovers).
 
 ## v2.0 — "Next platform" (long-term, upstream-gated)
 

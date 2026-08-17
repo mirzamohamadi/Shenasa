@@ -1,60 +1,60 @@
-# GO-LIVE checklist — private GitHub publish
+# GO-LIVE checklist — public GitHub publish (v1.3.0)
 
-Publishing Shenasa to a **private** GitHub repository, step by step.
+Publishing Shenasa v1.3.0 to **github.com/mirzamohamadi/shenasa**.
+Paste-ready names and notes: `docs/GITHUB-RELEASE-v1.3.0.md`.
 
 ## 1. Pre-flight (local)
 
-- [ ] `npm install && npm run check` passes (lint + smoke tests).
-- [ ] `bash test/integration.sh` passes on a docker host.
-- [ ] No secrets in the working tree:
-      `grep -rinE 'password|secret|token|private.?key' js/config.js css/ index.html`
-      should show only inert words; real credentials may only ever live in
+- [ ] `npm install && npm run check` is green (71 tests at time of writing).
+- [ ] On a Docker host: `bash test/integration.sh` — must print
+      `creating basic OAuth2 client` and
+      `public + basic OAuth2 and SSO endpoints OK`.
+- [ ] No secrets in the working tree. Real credentials may only live in
       `deploy/out/`, `deploy/tls/` (git-ignored).
-- [ ] `git status` clean of generated artifacts
-      (`deploy/out/`, `deploy/ui/`, `deploy/tls/`, `dist/`, `node_modules/`).
-- [ ] `.gitignore` present; confirm `git check-ignore deploy/tls/key.pem`.
-- [ ] README quick-start values match your domains, and `js/config.js`
-      defaults are the intended public ones.
+- [ ] `git check-ignore -v deploy/tls/key.pem` succeeds.
+- [ ] `package.json` version is `1.3.0`; CHANGELOG `[1.3.0]` is dated;
+      README compatibility table says v1.3.0.
+- [ ] `js/config.js` defaults are `idm.example.com` placeholders.
 
-## 2. Repository setup
+## 2. Repository About (web UI)
 
-- [ ] Create the repo as **private** (web UI → New → Private). Do **not**
-      publish TLS keys, `idm_admin` credentials, or recovered passwords.
-- [ ] Branch protection on `main`: require PR reviews, require CI checks
-      (lint-test, integration, security-audit) to pass before merge.
-- [ ] Enable Dependabot alerts and secret scanning (Security tab → Code
-      security and analysis).
-- [ ] Add topics/description; set the homepage to your Shenasa URL.
+- [ ] Description = the 350-char block in `docs/GITHUB-RELEASE-v1.3.0.md`
+      (replace the leftover v1.1.0 / Kanidm 1.10-only line).
+- [ ] Topics: `kanidm`, `identity-management`, `admin-ui`, `webauthn`,
+      `passkeys`, `fido2`, `oidc`, `oauth2`, `rbac`, `vanilla-javascript`,
+      `security`.
+- [ ] Protect `main` (PR + CI green, no force-push).
+- [ ] Security: Dependabot alerts, private vulnerability reporting
+      (SECURITY.md is in place).
 
-## 3. First push
+## 3. Commit, tag, release
 
-```sh
-git init -b main
-git add .
-git commit -m "Shenasa 0.1.0 — Kanidm admin UI"
-git remote add origin git@github.com:<org>/shenasa.git
-git push -u origin main
-```
+Follow **`docs/GITHUB-RELEASE-v1.3.0.md` §2** exactly.
 
-- [ ] CI workflow appears under Actions and goes green on `main`.
-- [ ] Tag the release: `git tag -a v0.1.0 -m "0.1.0" && git push origin v0.1.0`.
-- [ ] Create a GitHub Release from the tag; attach
-      `dist/shenasa-ui-0.1.0.tar.gz` (`make release`).
+- [ ] One commit on `main`.
+- [ ] Annotated tag `v1.3.0` — do **not** also push `v1.3.1` or `v1.2.0`.
+- [ ] `git push origin main`, then `gh release create` (or the web UI),
+      then `git push origin v1.3.0`.
+- [ ] Confirm `release.yml` attached `shenasa-admin-v1.3.0.zip` + `.sha256`.
+- [ ] Confirm GHCR image `ghcr.io/mirzamohamadi/shenasa-ui:1.3.0` if the
+      workflow ran.
 
-## 4. Production deployment
+## 4. Production host (after the tag exists)
 
-- [ ] `bash deploy/setup.sh idm.example.com` (single-origin) — or the
-      two-domain variant — on the target host.
-- [ ] Install **publicly trusted certificates** (replace the quickstart CA).
-- [ ] Verify with the checklist in `deploy/README.md` (discovery document,
-      SSO round-trip, RBAC gating).
+- [ ] `bash deploy/setup.sh idm.example.com` (or two-domain). On a 1.10.x
+      host, re-pin `kanidm/server:1.10.5` first — the zip defaults to
+      1.11.0 and Kanidm cannot downgrade.
+- [ ] Replace the quickstart CA with publicly trusted certificates.
+- [ ] Store the **new** `idm_admin` password (bootstrap rotates it).
+- [ ] Verify: discovery document, SSO round-trip, write unlock, one Apps
+      create (public + basic), recycle revive.
 - [ ] Create operator accounts; assign role groups; register passkeys.
-- [ ] Schedule Kanidm backups (`online_backup` in `server.toml`) and test a
-      restore once.
+- [ ] Enable `online_backup` in `server.toml` and test a restore once.
 
 ## 5. Ongoing
 
 - [ ] Pin `kanidm/server` image digests in production compose files.
-- [ ] Review access quarterly (role-group membership).
-- [ ] Keep `CHANGELOG.md` current; bump `package.json` version per release.
-- [ ] Rotate the `idm_admin` password; keep it out of chat/email.
+- [ ] Review `idm_*` membership quarterly (Groups → Export JSON + Reports
+      diff).
+- [ ] Keep CHANGELOG current; bump `package.json` per release.
+- [ ] Rotate `idm_admin`; keep it out of chat/email.

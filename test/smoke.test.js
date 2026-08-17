@@ -825,6 +825,34 @@ async function main() {
     w.Store.setUser({ name: 'c', roles: ['idm_admins', 'idm_people_admins'], token: 'x', authMethod: 'sso' });
     assert(!w.Store.canManageOauth2(), 'idm_admins has NO oauth2 power (builtin ACPs)');
     assert(!w.Store.canManageServiceAccounts(), 'idm_admins has NO service-account power');
+    w.Store.setUser({ name: 'd', roles: ['domain_admins'], token: 'x', authMethod: 'sso' });
+    assert(w.Store.canDomainAdmin(), 'domain_admins -> domain settings');
+    assert(!w.Store.canManageOauth2(), 'domain_admins != oauth2 power');
+    w.Store.setUser({ name: 'e', roles: ['idm_admins'], token: 'x', authMethod: 'sso' });
+    assert(!w.Store.canDomainAdmin(), 'idm_admins has NO domain power (upstream nesting: system_admins only — groups.rs)');
+  });
+
+  await test('API client: credential status + domain attr wiring (verified v1.3 contracts)', async () => {
+    // GET /v1/person/{id}/_credential/_status (v1.rs:1541, identical
+    // 1.10/1.11); domain _attr GET Option<Vec<String>> / PUT bare array,
+    // booleans as "true"/"false" (v1.rs:2499+, libs/client/src/domain.rs).
+    const calls = [];
+    const w = loadModules({
+      fetch: async (url, init) => {
+        calls.push({ url, method: init.method, body: init.body });
+        return { ok: true, status: 200, headers: { get: () => null }, text: async () => '{}' };
+      }
+    });
+    w.Store.user = { token: 'x' };
+    w.SHENASA_CONFIG.apiUrl = 'https://idm.example.test/v1';
+    await w.Api.getCredentialStatus('b ob');
+    await w.Api.getDomainAttr('domain_allow_account_recovery');
+    await w.Api.putDomainAttr('domain_allow_account_recovery', ['true']);
+    assertEq(calls[0].url, 'https://idm.example.test/v1/person/b%20ob/_credential/_status', 'cred status URL encoded');
+    assertEq(calls[0].method, 'GET', 'cred status method');
+    assertEq(calls[1].url, 'https://idm.example.test/v1/domain/_attr/domain_allow_account_recovery', 'domain attr URL');
+    assertEq(calls[2].method, 'PUT', 'domain attr PUT method');
+    assertEq(calls[2].body, '["true"]', 'domain attr PUT bare-array body');
   });
 
   await test('validation: oauth client / service account / api token forms', () => {
@@ -844,6 +872,13 @@ async function main() {
     assertEq(V.parseTokenList('a b,c').length, 3, 'token list parser');
   });
 
+  await test('validation: domain settings form', () => {
+    const env = loadModules({});
+    assert(env.Validation.domainSettingsForm({ domainDisplayName: 'Acme IdM' }).ok, 'plain name ok');
+    assert(env.Validation.domainSettingsForm({ domainDisplayName: '' }).ok, 'empty = leave unset');
+    assert(!env.Validation.domainSettingsForm({ domainDisplayName: 'x'.repeat(300) }).ok, 'overly long rejected');
+  });
+
   await test('config: idleTimeoutMin parsing and clamping', () => {
     // Default = disabled.
     let w = loadModules({});
@@ -861,6 +896,87 @@ async function main() {
     const stored = JSON.parse(w.localStorage.getItem('shenasa.config'));
     assertEq(stored.idleTimeoutMin, '15', 'idle timeout persisted');
     assertEq(typeof stored.sneakyKey, 'undefined', 'unknown keys rejected');
+    assertEq(typeof w.ShenaConfig.locale(), 'string', 'locale getter exists');
+  });
+
+  await test('config: rejects javascript/data/remote-http apiUrl and redirect', () => {
+    const w = loadModules({});
+    assert(w.ShenaConfig.isSafeHttpUrl('https://idm.example.com/v1'), 'https ok');
+    assert(w.ShenaConfig.isSafeHttpUrl('http://localhost:8080/v1'), 'loopback http ok');
+    assert(w.ShenaConfig.isSafeHttpUrl('http://127.0.0.1/v1'), '127.0.0.1 ok');
+    assert(!w.ShenaConfig.isSafeHttpUrl('javascript:alert(1)'), 'javascript rejected');
+    assert(!w.ShenaConfig.isSafeHttpUrl('data:text/html,x'), 'data rejected');
+    assert(!w.ShenaConfig.isSafeHttpUrl('http://evil.example.com/v1'), 'remote http rejected');
+    const merged = w.ShenaConfig.resolve({}, '?apiUrl=javascript:alert(1)&oidcRedirectUri=data:text/html,x');
+    assertEq(merged.apiUrl, 'https://idm.example.com/v1', 'bad apiUrl falls back to default');
+    assertEq(merged.oidcRedirectUri, 'https://idm.example.com/oauth2/redirect', 'bad redirect falls back');
+    const q = w.ShenaConfig.parseQuery('?apiUrl=https://idm.test/v1&bad=%E0%A4%A');
+    assertEq(q.apiUrl, 'https://idm.test/v1', 'valid pair kept beside a malformed one');
+    assertEq(typeof q.bad, 'undefined', 'malformed percent-encoding dropped, no throw');
+    assert(!w.Validation.serviceUrl('javascript:alert(1)', 'API').ok, 'serviceUrl rejects javascript');
+    assert(w.Validation.serviceUrl('https://idm.example.com/v1', 'API').ok, 'serviceUrl accepts https');
+  });
+
+  await test('auth: SSO/logout refuse a non-http(s) origin', async () => {
+    const w = loadModules({
+      location: { origin: 'https://admin.example.test', assign() { throw new Error('must not navigate'); } }
+    });
+    w.SHENASA_CONFIG.apiUrl = 'javascript:alert(1)';
+    let threw = null;
+    try { await w.Auth.startSsoLogin(); } catch (e) { threw = e; }
+    assert(threw && /https/i.test(threw.message), 'SSO start refuses javascript origin');
+    w.Store.setUser({ name: 'a', roles: [], token: '', authMethod: 'sso' });
+    const res = await w.Auth.signOut();
+    assertEq(res.logoutUrl, null, 'logout URL suppressed for an unsafe origin');
+  });
+
+  await test('API client: empty mail PATCH is a purge array, not a skip', async () => {
+    const calls = [];
+    const w = loadModules({
+      fetch: async (url, init) => {
+        calls.push({ url, method: init.method, body: init.body });
+        return { ok: true, status: 200, headers: { get: () => null }, text: async () => '{}' };
+      }
+    });
+    w.Store.user = { token: 'x' };
+    w.SHENASA_CONFIG.apiUrl = 'https://idm.example.test/v1';
+    await w.Api.updatePerson('alice', { mail: '' });
+    const body = JSON.parse(calls[0].body);
+    assert(Array.isArray(body.attrs.mail) && body.attrs.mail.length === 0,
+      'empty mail serialises as [] (Kanidm attribute purge)');
+  });
+
+  await test('config: locale allow-list and sanitisation', () => {
+    let w = loadModules({});
+    assertEq(w.ShenaConfig.locale(), '', 'empty locale by default');
+    // Saved like any other allowed key.
+    w.ShenaConfig.save({ locale: 'de' });
+    assertEq(JSON.parse(w.localStorage.getItem('shenasa.config')).locale, 'de', 'locale persisted');
+    // Query/config values shaped like path traversal are dropped at load.
+    w = loadModules({ location: { search: '?locale=..%2F..%2Fetc', hash: '', pathname: '/', href: 'http://localhost/' } });
+    assertEq(w.ShenaConfig.locale(), '', 'traversal-shaped locale rejected');
+    w = loadModules({ location: { search: '?locale=pt-BR', hash: '', pathname: '/', href: 'http://localhost/' } });
+    assertEq(w.ShenaConfig.locale(), 'pt-BR', 'BCP-47 shaped locale accepted');
+  });
+
+  await test('api: in-flight GET de-duplication (no caching beyond flight)', async () => {
+    const env = loadModules({});
+    env.SHENASA_CONFIG.apiUrl = 'https://idm.example.test/v1';
+    let fetches = 0;
+    env.fetch = async () => {
+      fetches++;
+      return { status: 200, ok: true, statusText: 'OK', headers: { get: () => null }, text: async () => '[]' };
+    };
+    // Two concurrent identical GETs share ONE underlying fetch.
+    await Promise.all([env.Api.listPeople(), env.Api.listPeople()]);
+    assertEq(fetches, 1, 'concurrent identical GETs de-duplicated to one fetch');
+    // After the first settles, the NEXT call is a real fetch again (cleared).
+    await env.Api.listPeople();
+    assertEq(fetches, 2, 'no caching beyond the in-flight window');
+    // Writes are never de-duplicated.
+    env.Store.setUser({ name: 'a', display_name: 'A', mail: '', roles: [], token: 't0k', authMethod: 'sso' });
+    await Promise.allSettled([env.Api.listRecycled(), env.Api.listGroups()]);
+    assertEq(fetches, 4, 'different endpoints run in parallel');
   });
 
   await test('deploy: security headers and no TLS verification bypass', () => {
@@ -921,6 +1037,37 @@ async function main() {
     assertIncludes(setupSh, 'refusing to DOWNGRADE Kanidm', 'setup.sh aborts on an older image pin');
     assertIncludes(setupSh, 'MG0010DowngradeNotAllowed', 'setup.sh diagnoses the downgrade crash loop');
     assertIncludes(setupSh, 'upgrade-policy', 'setup.sh references the upstream upgrade policy');
+    // The SPA uses relative asset paths, so every single-origin config must
+    // redirect the exact path /admin to /admin/ — otherwise the login page
+    // renders blank (assets resolve to /js/... and 404 on the Kanidm proxy).
+    // Regression: observed live on the first single-origin deployment.
+    const singleOrigin = [
+      ['setup.sh (generated Caddyfile)', setupSh],
+      ['Caddyfile.example', caddy],
+      ['nginx single-origin', nginx1]
+    ];
+    for (const [name, text] of singleOrigin) {
+      assert(/redir \/admin \/admin\/ 308|return 301 \/admin\//.test(text),
+        `${name} redirects /admin -> /admin/`);
+    }
+    assert(!/@admin path \/admin\s/.test(setupSh),
+      'setup.sh must not serve the SPA on the exact /admin path (no trailing slash)');
+    // v1.3 CSP tightening: every served CSP uses style-src 'self' with NO
+    // unsafe-inline — inline styles must have been fully eliminated.
+    for (const [cspName, cspText] of [
+      ['setup.sh (generated Caddyfile)', setupSh], ['Caddyfile.example', caddy],
+      ['Caddyfile.ui', readFile('deploy/Caddyfile.ui')],
+      ['nginx single-origin', nginx1], ['nginx two-domain', nginx2]
+    ]) {
+      assertIncludes(cspText, "style-src 'self'", cspName + ' style-src self');
+      assert(cspText.indexOf('unsafe-inline') < 0, cspName + ' has no unsafe-inline');
+    }
+    for (const f of JS_FILES) {
+      const src = readFile(path.join('js', f));
+      assert(src.indexOf('style="') < 0, f + ' builds no style= attributes');
+      assert(!/setAttribute\(['"]style['"]/.test(src), f + ' no setAttribute(style)');
+      assert(!/\.style\.cssText\s*=/.test(src), f + ' no cssText assignment');
+    }
     const serverToml = readFile('deploy/server.toml.example');
     assertIncludes(serverToml, 'tls_chain', 'server.toml TLS chain');
     assertIncludes(serverToml, 'bindaddress', 'server.toml bind address');
@@ -935,6 +1082,10 @@ async function main() {
     assert(m, 'meta CSP present');
     assert(m[1].indexOf('frame-ancestors') < 0, 'no frame-ancestors in the meta CSP value');
     assertIncludes(html, "img-src 'self' data:", 'CSP img-src allows data: QR');
+    assertIncludes(m[1], "style-src 'self'", 'style-src locked to self');
+    assertNotIncludes(m[1], 'unsafe-inline', 'v1.3: no unsafe-inline anywhere in the CSP');
+    assertNotIncludes(html, 'style="', 'no inline style attributes in markup');
+    assertNotIncludes(html.toLowerCase(), '<style', 'no <style> element');
     for (const f of JS_FILES) assertIncludes(html, `src="js/${f}"`, `references js/${f}`);
     assertIncludes(html, 'href="css/styles.css"', 'references styles.css');
     const scripts = [...html.matchAll(/<script src="js\/([a-z]+\.js)"><\/script>/g)].map((m) => m[1]);
@@ -963,6 +1114,8 @@ async function main() {
     // attribute-usage shape only (comments above may name it in prose).
     assert(!/oauth2_rs_name\s*:/.test(it), 'integration.sh must not send oauth2_rs_name on create');
     assertIncludes(it, '_scopemap/', 'integration.sh grants scopes via the dedicated endpoint');
+    assertIncludes(it, '/oauth2/_basic', 'integration.sh creates a basic (confidential) client');
+    assertIncludes(it, '_basic_secret', 'integration.sh reads the generated basic secret');
   });
 
   await test('privacy: no private deployment identifiers in shipped sources', () => {
@@ -973,7 +1126,8 @@ async function main() {
       'deploy/docker-compose.yml', 'deploy/server.toml.example', 'deploy/Caddyfile.example',
       'deploy/Caddyfile.ui', 'deploy/Dockerfile.ui',
       'deploy/nginx/single-origin.conf.example', 'deploy/nginx/two-domain.conf.example',
-      'docs/ROADMAP.md', 'docs/USER-GUIDE.md'].concat(JS_FILES.map((f) => 'js/' + f));
+      'docs/ROADMAP.md', 'docs/USER-GUIDE.md', 'docs/APPS.md',
+      'docs/GITHUB-RELEASE-v1.3.0.md', 'docs/RELEASE-NOTES-v1.3.0.md'].concat(JS_FILES.map((f) => 'js/' + f));
     for (const f of files) {
       const m = readFile(f).match(/avvalman|fastcreate/i);
       if (m) throw new Error(`${f} leaks a private deployment identifier: "${m[0]}"`);
@@ -1002,7 +1156,9 @@ async function main() {
     console.log('\njsdom not installed — DOM suite skipped (run `npm install`).');
     for (const n of ['login screen', 'dashboard charts', 'nav real endpoints', 'settings gating',
       'users list + RBAC gating', 'groups list', 'profile', 'recycle bin', 'sessions UAT',
-      'settings no-mock', 'XSS inert injection']) skip(n, 'jsdom missing');
+      'settings no-mock', 'XSS inert injection', 'bulk add-to-group', 'bulk expiry',
+      'groups membership CSV import', 'reports page', 'reports pure helpers',
+      'perf 5k directory', 'a11y shell landmarks', 'locale packs']) skip(n, 'jsdom missing');
   }
 
   if (JSDOM) {
@@ -1046,7 +1202,14 @@ async function main() {
       { token_id: 'tok-1', label: 'ci', issued_at: 1700000000, expiry: null, purpose: 'readwrite' },
       { token_id: 'tok-2', label: 'poll', issued_at: 1700000001, expiry: 1893456000, purpose: 'readonly' }
     ];
-    const calls = { revived: [], api: [] };
+    const fakeCredStatus = {
+      creds: [
+        { uuid: 'c1111111-2222-3333-4444-555555555555', type_: 'Password' },
+        { uuid: 'c2222222-2222-3333-4444-555555555555', type_: { Passkey: ['MacBook Touch ID', 'YubiKey 5'] } },
+        { uuid: 'c3333333-2222-3333-4444-555555555555', type_: { PasswordMfa: [['authenticator'], [], 3] } }
+      ]
+    };
+    const calls = { revived: [], api: [], memberAdds: [], memberBulk: [], memberRemoves: [], personPatch: [], domainAttrs: [], oauthCreate: [], oauthUpdate: [], oauthSecret: [] };
     function makeFakeApi() {
       return {
         attr: (e, n) => (e && e.attrs && e.attrs[n] ? e.attrs[n][0] : undefined),
@@ -1071,24 +1234,51 @@ async function main() {
         reviveRecycled: async (uuid) => { calls.revived.push(uuid); return {}; },
         getSelfUat: async () => fakeUat,
         createPerson: async (d) => d,
-        updatePerson: async () => ({}),
+        updatePerson: async (n, d) => { calls.personPatch.push([n, d]); return {}; },
         deletePerson: async () => null,
-        addGroupMember: async () => null,
+        addGroupMember: async (g, m) => { calls.memberAdds.push([g, m]); return null; },
+        addGroupMembers: async (g, ms) => { calls.memberBulk.push([g, ms]); return null; },
+        removeGroupMembers: async (g, ms) => { calls.memberRemoves.push([g, ms]); return null; },
+        removePersonFromGroup: async () => null,
+        addPersonToGroup: async (p, g) => { calls.memberAdds.push([g, p]); return null; },
+        resetPassword: async () => ({ token: 'it-token-123' }),
+        getCredentialStatus: async () => fakeCredStatus,
+        getDomainAttr: async () => null,
+        putDomainAttr: async (a, v) => { calls.domainAttrs.push([a, v]); return {}; },
         removeGroupMember: async () => null,
         // v1.1: apps / service accounts / domain fixtures
-        getDomain: async () => ({ attrs: { name: ['idm.example.test'], displayname: ['Example IdM'] } }),
+        getDomain: async () => ({ attrs: { name: ['idm.example.test'], displayname: ['Example IdM'], domain_display_name: ['Example IdM'], domain_allow_account_recovery: ['false'] } }),
         listOauth2Clients: async () => fakeClients,
         getOauth2Client: async (n) => fakeClients.find((c) => c.attrs.name[0] === n),
-        getOauth2BasicSecret: async () => 'BASIC-SECRET-123',
+        getOauth2BasicSecret: async (n) => { calls.oauthSecret.push(n); return 'BASIC-SECRET-123'; },
         setOauth2ScopeMap: async () => ({}),
         deleteOauth2ScopeMap: async () => null,
         setOauth2SupScopeMap: async () => ({}),
         deleteOauth2SupScopeMap: async () => null,
         setOauth2ClaimMap: async () => ({}),
         deleteOauth2ClaimMap: async () => null,
-        createOauth2PublicClient: async () => ({}),
-        createOauth2BasicClient: async () => ({}),
-        updateOauth2Client: async () => ({}),
+        createOauth2PublicClient: async (d) => {
+          calls.oauthCreate.push(['public', d]);
+          fakeClients.push({ attrs: {
+            name: [d.name], displayname: [d.displayname],
+            class: ['object', 'oauth2_resource_server'],
+            oauth2_rs_origin_landing: [d.originLanding],
+            oauth2_strict_redirect_uri: ['true']
+          } });
+          return {};
+        },
+        createOauth2BasicClient: async (d) => {
+          calls.oauthCreate.push(['basic', d]);
+          fakeClients.push({ attrs: {
+            name: [d.name], displayname: [d.displayname],
+            class: ['object', 'oauth2_resource_server', 'oauth2_resource_server_basic'],
+            oauth2_rs_origin_landing: [d.originLanding],
+            oauth2_rs_basic_secret: ['hidden'],
+            oauth2_strict_redirect_uri: ['true']
+          } });
+          return {};
+        },
+        updateOauth2Client: async (n, a) => { calls.oauthUpdate.push([n, a]); return {}; },
         deleteOauth2Client: async () => null,
         listServiceAccounts: async () => fakeSvcAccounts,
         getServiceAccount: async (n) => fakeSvcAccounts.find((s) => s.attrs.name[0] === n),
@@ -1471,6 +1661,54 @@ async function main() {
       dom.window.close();
     });
 
+    await test('apps: create dialog type note swaps; basic create POSTs _basic, PATCHes origin, hashes to detail, shows secret', async () => {
+      calls.oauthCreate.length = 0;
+      calls.oauthUpdate.length = 0;
+      calls.oauthSecret.length = 0;
+      const before = fakeClients.length;
+      const dom = makeDom(['idm_oauth2_admins']);
+      const w = dom.window;
+      w.location.hash = '#/apps';
+      w.App.route();
+      await sleep(30);
+      w.document.querySelector('[data-new-client]').click();
+      await sleep(10);
+      const overlay = w.document.querySelector('.modal-overlay');
+      assert(overlay, 'create dialog opened');
+      assert(!overlay.querySelector('[name=clientSecret]'), 'no secret field on create (Kanidm generates it)');
+      const note = overlay.querySelector('[data-type-note]');
+      const sel = overlay.querySelector('[name=clientType]');
+      assert(note && sel, 'type select + live note present');
+      assertIncludes(note.textContent, 'PKCE', 'default live note is public');
+      sel.value = 'basic';
+      sel.dispatchEvent(new w.Event('change', { bubbles: true }));
+      assertIncludes(note.textContent, 'Kanidm generates the client secret', 'dropdown change updates the note');
+      assertIncludes(note.textContent, 'no secret tab', 'note says there is no secret tab');
+      sel.value = 'public';
+      sel.dispatchEvent(new w.Event('change', { bubbles: true }));
+      assertIncludes(note.textContent, 'PKCE', 'switching back restores the public note');
+      sel.value = 'basic';
+      overlay.querySelector('[name=name]').value = 'svcapp';
+      overlay.querySelector('[name=displayname]').value = 'Svc App';
+      overlay.querySelector('[name=originLanding]').value = 'https://svc.example.test/cb';
+      overlay.querySelector('[data-submit]').click();
+      await sleep(40);
+      assertEq(calls.oauthCreate.length, 1, 'one create call');
+      assertEq(calls.oauthCreate[0][0], 'basic', 'POST /v1/oauth2/_basic path chosen');
+      assertEq(calls.oauthCreate[0][1].name, 'svcapp', 'create name');
+      assertEq(calls.oauthUpdate.length, 1, 'origin PATCH after create');
+      assertEq(calls.oauthUpdate[0][0], 'svcapp', 'PATCH targets the new client');
+      assertEq(calls.oauthUpdate[0][1].oauth2_rs_origin[0], 'https://svc.example.test/cb', 'landing written as redirect origin');
+      assertEq(calls.oauthSecret[0], 'svcapp', 'GET _basic_secret after basic create');
+      assertEq(w.location.hash, '#/apps/svcapp', 'URL moves to the detail page');
+      const secretBody = w.document.querySelector('.modal-overlay .modal-body');
+      assert(secretBody, 'secret modal opened after basic create');
+      assertIncludes(secretBody.textContent, 'BASIC-SECRET-123', 'generated secret shown once');
+      assertIncludes(secretBody.textContent, 'Copy it now', 'one-time warning');
+      fakeClients.splice(before);
+      dom.window.close();
+    });
+
     await test('apps/svc denied views without roles (deep link safe)', async () => {
       const dom = makeDom(['idm_people_admins']);
       const w = dom.window;
@@ -1503,6 +1741,10 @@ async function main() {
       await sleep(10);
       const overlay = w.document.querySelector('.modal-overlay');
       assert(overlay, 'issue dialog opened');
+      assertIncludes(overlay.textContent, 'Read-write', 'read-write checkbox labelled in words, not leftover JS concat');
+      assertIncludes(overlay.textContent, 'read-only', 'default scope explained');
+      assertIncludes(overlay.textContent, 'Shorter token string', 'compact checkbox labelled in words');
+      assertNotIncludes(overlay.textContent, "esc(t(", 'template-literal concat bug must not leak into the dialog');
       overlay.querySelector('[name=label]').value = 'ci-deploy';
       overlay.querySelector('[name=readWrite]').checked = true;
       overlay.querySelector('[data-submit]').click();
@@ -1522,6 +1764,370 @@ async function main() {
       await sleep(30);
       assertIncludes(w.document.getElementById('view').innerHTML, 'Example IdM', 'domain display name in stat card');
       dom.window.close();
+    });
+
+    await test('settings: domain editor gated to domain_admins, verified PUT bodies', async () => {
+      // idm_acp_domain_admin receiver = UUID_DOMAIN_ADMINS (dl14/dl15) —
+      // idm_admins is NOT nested into it (its members are system_admins).
+      const dom = makeDom(['idm_admins']);
+      const w = dom.window;
+      w.location.hash = '#/settings';
+      w.App.route();
+      await sleep(30);
+      assert(!w.document.querySelector('[data-domain-form]'),
+        'idm_admins sees NO domain editor');
+      const dom2 = makeDom(['domain_admins']);
+      const w2 = dom2.window;
+      w2.location.hash = '#/settings';
+      w2.App.route();
+      await sleep(30);
+      const form = w2.document.querySelector('[data-domain-form]');
+      assert(form, 'domain editor renders for domain_admins');
+      calls.domainAttrs.length = 0;
+      form.querySelector('[name=domainDisplayName]').value = 'Renamed IdM';
+      form.querySelector('[data-allow-recovery]').checked = true;
+      w2.document.querySelector('[data-domain-save]').click();
+      await sleep(30);
+      assertEq(calls.domainAttrs.length, 2, 'two attr PUTs (name + toggle)');
+      assertEq(calls.domainAttrs[0][0], 'domain_display_name', 'display-name attr');
+      assertEq(calls.domainAttrs[0][1][0], 'Renamed IdM', 'display-name bare-array value');
+      assertEq(calls.domainAttrs[1][0], 'domain_allow_account_recovery', 'recovery attr');
+      assertEq(calls.domainAttrs[1][1][0], 'true', 'boolean serialized as "true" string');
+    });
+
+    await test('user detail: credential status card — types, labels, empty, 403-resilient', async () => {
+      const dom = makeDom(['idm_admins']);
+      const w = dom.window;
+      w.location.hash = '#/users/alice';
+      w.App.route();
+      await sleep(40);
+      let view = w.document.getElementById('view');
+      const rows = view.querySelectorAll('[data-cred-row]');
+      assertEq(rows.length, 3, 'credential rows rendered');
+      assertIncludes(view.innerHTML, 'MacBook Touch ID', 'passkey labels listed');
+      assertIncludes(view.innerHTML, '3 backup code', 'backup-code count');
+      assertIncludes(view.innerHTML, 'c1111111', 'credential UUID shown');
+      // Empty (server-side NoMatchingAttributes → 200 {creds:[]}) → honest state
+      w.Api.getCredentialStatus = async () => ({ creds: [] });
+      await w.Pages.userDetail(w.document.getElementById('view'), 'alice');
+      view = w.document.getElementById('view');
+      assertIncludes(view.innerHTML, 'No credentials set', 'empty credential state');
+      // 403 (no credential-reset ACP) → restricted note, page stays alive
+      w.Api.getCredentialStatus = async () => { const e = new Error('Forbidden'); e.status = 403; throw e; };
+      await w.Pages.userDetail(w.document.getElementById('view'), 'alice');
+      view = w.document.getElementById('view');
+      assertIncludes(view.innerHTML, 'service-desk', 'restricted note names the needed roles');
+    });
+
+    await test('onboarding wizard: person → baseline groups → QR link', async () => {
+      const dom = makeDom(['idm_people_admins']);
+      const w = dom.window;
+      calls.memberAdds.length = 0;
+      w.location.hash = '#/users';
+      w.App.route();
+      await sleep(30);
+      const btn = w.document.querySelector('[data-users-onboard]');
+      assert(btn, 'onboard wizard button for people managers');
+      btn.click();
+      await sleep(10);
+      const step = () => w.document.querySelector('[data-onboard-step]');
+      step().querySelector('[name=name]').value = 'newbie';
+      step().querySelector('[name=displayname]').value = 'New Bie';
+      step().querySelector('[name=mail]').value = 'n@example.test';
+      w.document.querySelector('[data-onboard-foot] [data-onboard-next]').click();
+      await sleep(30);
+      const gboxes = step().querySelectorAll('[data-onboard-group]');
+      assert(gboxes.length >= 2, 'baseline group choices rendered');
+      const gvals = [...gboxes].map((g) => g.value);
+      assert(!gvals.some((v) => v.indexOf('idm_') === 0), 'idm_* role groups excluded from onboarding');
+      gboxes[0].checked = true;
+      w.document.querySelector('[data-onboard-foot] [data-onboard-next]').click();
+      await sleep(40);
+      assertEq(calls.memberAdds.length, 1, 'one membership grant POSTed');
+      assertEq(calls.memberAdds[0][1], 'newbie', 'grant targets the new person');
+      const code = step().querySelector('code.break-all');
+      assert(code, 'first-sign-in link shown');
+      assertIncludes(code.textContent, '/ui/reset?token=it-token-123', 'intent link carries the token');
+      assert(step().querySelector('.qr-box svg'), 'QR hand-off rendered');
+    });
+
+    await test('bulk: add-to-group dry-run computes adds/skips, applies in ONE call', async () => {
+      const dom = makeDom(['idm_people_admins', 'idm_group_admins']);
+      const w = dom.window;
+      calls.memberBulk.length = 0;
+      w.location.hash = '#/users';
+      w.App.route();
+      await sleep(30);
+      const view = w.document.getElementById('view');
+      const boxes = [...view.querySelectorAll('[data-user-select]')];
+      assertEq(boxes.length, 4, 'one checkbox per filtered row');
+      for (const b of boxes) {
+        if (['alice', 'bob', 'carol'].includes(b.getAttribute('data-user-select'))) b.click();
+      }
+      const bar = view.querySelector('[data-bulkbar]');
+      assert(bar && !bar.hidden, 'bulk bar visible after selection');
+      assertIncludes(bar.querySelector('[data-bulk-count]').textContent, '3', 'count shows 3 selected');
+      view.querySelector('[data-bulk-add-group]').click();
+      await sleep(10);
+      const modal = w.document.querySelector('[aria-modal="true"]');
+      assert(modal, 'bulk modal opened');
+      // idm_* role groups must NOT be bulk-assignable (deliberate-only).
+      const opts = [...modal.querySelectorAll('[name=bulkGroup] option')].map((o) => o.value);
+      assert(opts.indexOf('staff') >= 0, 'custom group assignable');
+      assert(opts.indexOf('idm_admins') < 0, 'idm_* role groups excluded from bulk add');
+      modal.querySelector('[name=bulkGroup]').value = 'staff';
+      modal.querySelector('[data-dry]').click();
+      await sleep(20);
+      const report = modal.querySelector('[data-bulk-report]');
+      // staff members: alice, bob (+nested team) → only carol is an add.
+      assertIncludes(report.textContent, 'carol', 'dry-run marks carol as add');
+      assertIncludes(report.textContent, 'alice', 'dry-run lists alice as skip');
+      const apply = modal.querySelector('[data-apply]');
+      assert(!apply.disabled, 'apply enabled after a positive dry-run');
+      apply.click();
+      await sleep(40);
+      assertEq(calls.memberBulk.length, 1, 'exactly ONE batched membership POST');
+      assertEq(calls.memberBulk[0][0], 'staff', 'batch targets the chosen group');
+      assertEq(JSON.stringify(calls.memberBulk[0][1]), JSON.stringify(['carol']), 'only effective adds posted');
+      assert(!w.document.querySelector('[aria-modal="true"]'), 'modal closed after apply');
+    });
+
+    await test('bulk: set + clear expiry (purge-array PATCH semantics)', async () => {
+      const dom = makeDom(['idm_people_admins']);
+      const w = dom.window;
+      calls.personPatch.length = 0;
+      w.location.hash = '#/users';
+      w.App.route();
+      await sleep(30);
+      const view = w.document.getElementById('view');
+      const pick = (names) => {
+        for (const b of [...view.querySelectorAll('[data-user-select]')]) {
+          if (names.includes(b.getAttribute('data-user-select'))) b.click();
+        }
+      };
+      pick(['bob', 'dave']);
+      view.querySelector('[data-bulk-expiry]').click();
+      await sleep(10);
+      let modal = w.document.querySelector('[aria-modal="true"]');
+      modal.querySelector('[name=bulkExpire]').value = '2030-05-02';
+      modal.querySelector('[data-dry]').click();
+      const apply = modal.querySelector('[data-apply]');
+      assert(!apply.disabled, 'both rows change → apply enabled');
+      apply.click();
+      await sleep(40);
+      assertEq(calls.personPatch.length, 2, 'one PATCH per changed user');
+      const bobPatch = calls.personPatch.find((p) => p[0] === 'bob');
+      assertEq(bobPatch[1].expire, '2030-05-02T00:00:00Z', 'RFC3339 start-of-day (matches the person form)');
+      // Now CLEAR: bob gets the purge form (empty array), dave is unchanged (no expiry).
+      await sleep(20);
+      const freshBoxes = [...view.querySelectorAll('[data-user-select]')];
+      for (const b of freshBoxes) if (['bob', 'dave'].includes(b.getAttribute('data-user-select'))) b.click();
+      view.querySelector('[data-bulk-expiry]').click();
+      await sleep(10);
+      modal = w.document.querySelector('[aria-modal="true"]');
+      modal.querySelector('[data-exp-clear]').click();
+      assert(modal.querySelector('[name=bulkExpire]').disabled, 'date input disabled in clear mode');
+      modal.querySelector('[data-dry]').click();
+      modal.querySelector('[data-apply]').click();
+      await sleep(40);
+      const last = calls.personPatch[calls.personPatch.length - 1];
+      assertEq(last[0], 'bob', 'only bob needed a change');
+      assert(Array.isArray(last[1].expire) && last[1].expire.length === 0,
+        'clear = EMPTY ARRAY (purge-then-present: ModifyList::from_patch)');
+      assertEq(calls.personPatch.length, 3, 'dave (no current expiry) correctly skipped as unchanged');
+    });
+
+    await test('groups: membership CSV dry-run verdicts + batched apply', async () => {
+      const dom = makeDom(['idm_group_admins']);
+      const w = dom.window;
+      calls.memberBulk.length = 0; calls.memberRemoves.length = 0;
+      w.location.hash = '#/groups';
+      w.App.route();
+      await sleep(30);
+      const view = w.document.getElementById('view');
+      view.querySelector('[data-groups-import-members]').click();
+      await sleep(10);
+      const modal = w.document.querySelector('[aria-modal="true"]');
+      const fi = modal.querySelector('input[type=file]');
+      const csv = [
+        'group,member,action',
+        'staff,alice,add',      // already member → skip
+        'staff,carol,add',      // effective add
+        'staff,bob,remove',     // effective remove
+        'team,carol,remove',    // effective remove
+        'ghost,alice,add',      // unknown group → conflict
+        'staff,ghosty,add',     // unknown member → conflict
+        'staff,dave,sideways'   // bad action → conflict
+      ].join('\n');
+      const file = new w.File([csv], 'members.csv', { type: 'text/csv' });
+      Object.defineProperty(fi, 'files', { value: [file], configurable: true });
+      fi.dispatchEvent(new w.Event('change', { bubbles: true }));
+      await sleep(30);
+      const dry = modal.querySelector('[data-dry]');
+      assert(!dry.disabled, 'dry-run enabled once a file is parsed');
+      dry.click();
+      await sleep(40);
+      const preview = modal.querySelector('.modal') || modal;
+      const txt = modal.textContent;
+      assertIncludes(txt, '1 add(s)', 'one effective add');
+      assertIncludes(txt, '2 remove(s)', 'two effective removes');
+      assertIncludes(txt, '1 no-op(s)', 'one no-op');
+      assertIncludes(txt, '3 conflict(s)', 'three conflicts');
+      assertIncludes(txt, 'unknown group', 'conflict reasons shown');
+      const apply = modal.querySelector('[data-apply]');
+      assert(!apply.disabled, 'apply enabled (effective changes exist)');
+      apply.click();
+      await sleep(40);
+      assertEq(calls.memberBulk.length, 1, 'adds batched: one POST');
+      assertEq(JSON.stringify(calls.memberBulk[0]), JSON.stringify(['staff', ['carol']]), 'staff add batch');
+      assertEq(calls.memberRemoves.length, 2, 'removes batched per group');
+      assertEq(JSON.stringify(calls.memberRemoves[0]), JSON.stringify(['staff', ['bob']]), 'staff remove batch');
+      assertEq(JSON.stringify(calls.memberRemoves[1]), JSON.stringify(['team', ['carol']]), 'team remove batch');
+      if (preview) {} // (placeholder keeps the modal var used)
+    });
+
+    await test('reports: expiring-soon + passkey adoption per group', async () => {
+      const dom = makeDom(['idm_people_admins']);
+      const w = dom.window;
+      w.location.hash = '#/reports';
+      w.App.route();
+      await sleep(60);
+      const view = w.document.getElementById('view');
+      // Expiring report: bob expired 2020-01-01; nobody else has an expiry.
+      view.querySelector('[data-exp-run]').click();
+      await sleep(40);
+      const expOut = view.querySelector('[data-exp-out]');
+      assertIncludes(expOut.textContent, 'bob', 'expired account listed');
+      assertIncludes(expOut.textContent, 'expired', 'negative days shown as expired chip');
+      assertNotIncludes(expOut.textContent, 'alice', 'accounts without expiry excluded');
+      assert(!view.querySelector('[data-exp-csv]').disabled, 'CSV export enabled with rows');
+      // Passkey report over staff (alice, bob = persons; team = nested group).
+      const pkSel = view.querySelector('[data-pk-group]');
+      assert(pkSel, 'group selector rendered');
+      const values = [...pkSel.querySelectorAll('option')].map((o) => o.value);
+      assert(values.includes('staff'), 'groups loaded into the selector');
+      pkSel.value = 'staff';
+      view.querySelector('[data-pk-run]').click();
+      await sleep(80);
+      const pkOut = view.querySelector('[data-pk-out]');
+      assertIncludes(pkOut.textContent, 'Passkey + other: 2', 'both staff members classified from real cred status');
+      assertIncludes(pkOut.textContent, 'nested groups', 'non-person member reported as skipped');
+      assertIncludes(pkOut.textContent, 'alice', 'per-member table lists alice');
+    });
+
+    await test('reports: pure helpers — parse, diff, credClass, CSV import plan', () => {
+      const dom = makeDom(['idm_people_admins']);
+      const w = dom.window;
+      // parse + diff
+      const oldE = w.ShenaReports.parseGroupExport(JSON.stringify({
+        groups: [{ name: 'staff', members: ['alice', 'bob'] }, { name: 'gone', members: ['x'] }]
+      }), 'old.json');
+      const newE = w.ShenaReports.parseGroupExport(
+        '[{"name":"staff","members":["alice","carol"]},{"name":"newg","members":[]}]', 'new.json');
+      const rows = w.ShenaReports.diffGroupExports(oldE, newE);
+      assertEq(rows.length, 3, 'three groups differ');
+      const staff = rows.find((r) => r.group === 'staff');
+      assertEq(JSON.stringify(staff.added), JSON.stringify(['carol']), 'added computed');
+      assertEq(JSON.stringify(staff.removed), JSON.stringify(['bob']), 'removed computed');
+      assertEq(staff.note, '', 'no note when present on both sides');
+      assertEq(rows.find((r) => r.group === 'gone').note, 'reports.diff.groupOnlyOld', 'only-in-older noted');
+      assertEq(rows.find((r) => r.group === 'newg').note, 'reports.diff.groupOnlyNew', 'only-in-newer noted');
+      let bad = false;
+      try { w.ShenaReports.parseGroupExport('{"hello":1}', 'x.json'); } catch (e) { bad = true; }
+      assert(bad, 'non-export JSON rejected');
+      // credClass (serde extern-tagged enum, exact shapes)
+      const cc = w.ShenaReports.credClass;
+      assertEq(cc({ creds: [] }), 'none', 'no creds → none');
+      assertEq(cc({ creds: [{ type_: 'Password' }] }), 'noPasskey', 'password only');
+      assertEq(cc({ creds: [{ type_: { Passkey: ['a'] } }] }), 'passkeyOnly', 'passkey object form');
+      assertEq(cc({ creds: [{ type_: 'Passkey' }] }), 'passkeyOnly', 'passkey unit form');
+      assertEq(cc({ creds: [{ type_: 'Password' }, { type_: { Passkey: ['k'] } }] }), 'withPasskey', 'mixed');
+      // membership CSV import plan (same fixture matrix as the DOM test)
+      const groups = [
+        { attrs: { name: ['staff'], member: ['alice@x.test', 'bob@x.test'] } },
+        { attrs: { name: ['team'], member: ['carol@x.test'] } }
+      ];
+      const people = [{ attrs: { name: ['alice'] } }, { attrs: { name: ['bob'] } }, { attrs: { name: ['carol'] } }];
+      const plan = w.ShenaReports.membershipImportPlan([
+        ['staff', 'alice', 'add'], ['staff', 'carol', 'add'], ['staff', 'bob', 'remove'],
+        ['team', 'carol', 'remove'], ['ghost', 'alice', 'add'], ['staff', 'ghosty', 'add'],
+        ['staff', 'bob', 'sideways']
+      ], groups, people);
+      assertEq(plan.map((e) => e.verdict).join(','), 'skip,add,remove,remove,conflict,conflict,conflict',
+        'verdicts per row');
+      assertEq(plan[5].reason, 'gimport.reason.unknownMember', 'unknown member reason');
+      assertEq(plan[6].reason, 'gimport.reason.badAction', 'bad action reason');
+    });
+
+    await test('perf: 5k-entry directory renders one page (windowed), stays interactive', async () => {
+      const dom = makeDom(['idm_people_admins']);
+      const w = dom.window;
+      for (let i = 0; i < 5000; i++) {
+        fakePeople.push({ attrs: { name: ['u' + String(i).padStart(4, '0')], displayname: ['User ' + i], uuid: ['px' + i] } });
+      }
+      try {
+        w.location.hash = '#/users';
+        const t0 = Date.now();
+        w.App.route();
+        await sleep(150);
+        const view = w.document.getElementById('view');
+        const rows = view.querySelectorAll('tbody tr');
+        assertEq(rows.length, 15, 'only PAGE_SIZE rows in the DOM for 5004 entries');
+        assertIncludes(view.textContent, 'of 334', 'pagination reports the full 334 pages');
+        assertIncludes(view.textContent, '5004', 'total count shown');
+        assert(Date.now() - t0 < 5000, 'render within a generous budget even in jsdom');
+      } finally {
+        fakePeople.splice(4); // restore the shared fixture
+      }
+    });
+
+    await test('a11y: skip link + aria-current on the active nav item', async () => {
+      const dom = makeDom(['idm_people_admins']);
+      const w = dom.window;
+      w.location.hash = '#/users';
+      w.App.route();
+      await sleep(30);
+      const skip = w.document.querySelector('a.skip-link');
+      assert(skip, 'skip link present');
+      assertEq(skip.getAttribute('href'), '#view', 'skip link targets the main view');
+      const current = w.document.querySelector('.sidebar a.nav-link[aria-current="page"]');
+      assert(current, 'active nav item carries aria-current=page');
+      assertIncludes(current.textContent, 'Users', 'aria-current marks Users on the users route');
+      const reportsLink = [...w.document.querySelectorAll('.sidebar a.nav-link')]
+        .find((a) => a.getAttribute('href') === '#/reports');
+      assert(reportsLink, 'Reports appears in the nav for people managers');
+    });
+
+    await test('locale packs: apply honours only known string keys; load is sandboxed', async () => {
+      const dom = makeDom(null);
+      const w = dom.window;
+      const origSave = w.t('common.save');
+      const origDel = w.t('common.delete');
+      const applied = w.ShenaI18n.applyPack({ 'common.save': 'Speichern', 'bogus.key': 'x', 'common.cancel': 7 });
+      assertEq(applied, 1, 'only known keys with string values applied');
+      assertEq(w.t('bogus.key'), 'bogus.key', 'unknown keys never enter the table');
+      let fetched = '';
+      w.fetch = async (url) => {
+        fetched = String(url);
+        return { ok: true, status: 200, json: async () => ({ 'common.delete': 'Löschen' }) };
+      };
+      assertEq(await w.ShenaI18n.loadPack('de'), true, 'pack loads');
+      assertIncludes(fetched, 'locales/de.json', 'same-origin pack URL');
+      assertEq(w.t('common.delete'), 'Löschen', 'pack override live');
+      assertEq(w.ShenaI18n.current(), 'de', 'current locale tracked');
+      let threw = false;
+      try { await w.ShenaI18n.loadPack('../secrets'); } catch (e) { threw = true; }
+      assert(threw, 'traversal-shaped locale codes rejected');
+      w.fetch = async () => { throw new Error('must not be called'); };
+      assertEq(await w.ShenaI18n.loadPack('en'), false, 'en = core, no fetch at all');
+      // Missing pack → error, caller decides (Settings shows the note).
+      w.fetch = async () => ({ ok: false, status: 404, json: async () => ({}) });
+      threw = false;
+      try { await w.ShenaI18n.loadPack('fr'); } catch (e) { threw = true; }
+      assert(threw, 'HTTP 404 pack surfaces as an error');
+      // Restore the English core for any later assertions.
+      w.ShenaI18n.applyPack({ 'common.save': origSave, 'common.delete': origDel });
+      assertEq(w.t('common.save'), origSave, 'English core restored');
     });
 
     await test('idle watchdog: inactive session is fully signed out', async () => {

@@ -1,373 +1,391 @@
 # Shenasa User Guide
 
-Complete guide to operating Kanidm through Shenasa on a day-to-day basis,
-plus a field-tested **RBAC & tiering best practice** model you can adopt as
-your organisation's delegation standard.
+How every page actually works, plus the RBAC / tiering model.
 
 - Audience: identity administrators, service-desk staff, security engineers.
-- Applies to: **Shenasa v1.0.0** with **Kanidm server 1.10.x or 1.11.x**
-  (recommended 1.10.5 / verified 1.11.0 — see the Compatibility table in
-  the README; the server version is auto-detected and badged in Settings).
-- Everything below is verified against the Kanidm 1.10 behaviour; where the
-  server is the source of truth (and it always is), the server file is
-  named so you can check for yourself.
+- Applies to: **Shenasa v1.3.0** with **Kanidm 1.10.x or 1.11.x**
+  (recommended 1.10.5 / verified 1.11.0). Settings badges the live
+  `X-KANIDM-VERSION` header.
+- Kanidm is always the authority. Where this guide names a server file,
+  you can check it yourself.
+
+OAuth2/OIDC applications have a dedicated operator guide:
+**[APPS.md](APPS.md)**.
 
 ---
 
-## 1. Mental model: read this first
+## 1. Mental model
 
-### 1.1 Shenasa is a client, Kanidm is the authority
+### 1.1 Shenasa is a client
 
-Shenasa never grants permissions. It hides buttons you provably cannot use
-and explains denials, but **every single operation is re-authorised by the
-Kanidm server**. If the server says 403, the operation is denied — no UI
-state can override that. Conversely, a server-side grant works even if the
-UI looks conservative; reload to refresh the role view.
+Shenasa never grants permissions. It hides buttons you cannot use and
+explains denials. **Every operation is re-authorised by Kanidm.** A 403
+is final. A server-side grant works even if the UI still looks
+conservative — reload.
 
-### 1.2 Read-only sessions vs the write window (step-up)
+### 1.2 Read-only sessions vs the write window
 
-Kanidm interactive logins are **privilege-capable but read-only** until
-you prove possession again (the same design as `sudo`):
+Interactive logins are privilege-capable but **read-only** until you
+prove possession again (same idea as `sudo`):
 
-- Right after SSO or passkey sign-in, your token maps to
-  `AccessScope::ReadOnly`. **Any write returns a bare HTTP 403 — before
-  roles are even checked.** (Verified: `process_uat_to_identity` in
-  `server/lib/src/idm/server.rs`; the deny gates in
-  `server/lib/src/server/access/{delete,modify}.rs`.)
-- Click **🔒 Unlock write access** in the top bar (or on the Sessions
-  page) and touch your passkey once. The server reissues the token as
-  `ReadWrite` with an **expiry of ~10 minutes** (server constant:
-  `DEFAULT_AUTH_PRIVILEGE_EXPIRY = 600s`).
-- The top-bar chip shows the live state: 🔒 read-only, or ✍
-  *Writes until HH:MM*. When it expires, click it again.
-- Read operations (search, dashboard, exports) always work — only writes
-  need the window.
+- After SSO or passkey sign-in the token maps to
+  `AccessScope::ReadOnly`. **Any write is HTTP 403 before roles are
+  checked.** (`process_uat_to_identity` in `server/lib/src/idm/server.rs`.)
+- Click **Unlock write access** in the top bar (or on Sessions) and
+  touch a passkey. The server reissues `ReadWrite` for **~10 minutes**
+  (`DEFAULT_AUTH_PRIVILEGE_EXPIRY = 600s`).
+- The chip shows 🔒 read-only or ✍ *Writes until HH:MM*.
+- Reads always work.
 
-This is identical to the Kanidm web UI's `/ui/reauth` and the CLI's
-`kanidm reauth`. It is not a Shenasa limitation; it is Kanidm's
-session-hardening design.
+This is Kanidm’s design, not a Shenasa limitation.
 
 ### 1.3 Two sign-in methods
 
 | | SSO (OIDC) | Passkey |
 | --- | --- | --- |
-| How | Browser redirect through Kanidm's `/ui/oauth2`, Authorization Code + PKCE (S256, state, nonce) | Stepped `/v1/auth` ceremony (init → begin → cred), FIDO2 hardware |
-| REST auth afterwards | Kanidm **web-session cookie** (`credentials: 'include'`) — Kanidm 1.10 deliberately does not accept OIDC access tokens on `/v1` | Genuine **UserAuthToken** sent as bearer |
-| Needs | The `shenasa_admin_ui` public client registered on the server | Your account name typed once, plus a registered passkey |
-| Sign-out | Destroys the server session too (`GET /ui/logout`) | Clears the local token (stateless bearer; valid until expiry — Kanidm 1.10 has no revocation endpoint) |
+| How | Redirect through `/ui/oauth2`, Authorization Code + PKCE S256, state, nonce | Stepped `/v1/auth` (init → begin → cred), FIDO2 |
+| REST auth afterwards | Web-session **cookie** (`credentials: 'include'`). Kanidm 1.10/1.11 does not accept OIDC access tokens on `/v1` | Genuine **UserAuthToken** as bearer |
+| Needs | Public client `shenasa_admin_ui` on the server | Account name + a registered passkey |
+| Sign-out | `GET /ui/logout` destroys the server session | Clears the local token (stateless bearer; valid until expiry — no revoke API) |
 
-Both flows verify `iss`, `aud`, `exp` and the nonce before accepting any
-identity claims.
+Both flows check `iss`, `aud`, `exp` and nonce before accepting claims.
+
+There is no local password form, no demo mode, and no invitations page
+(Kanidm has no invitations REST API).
 
 ---
 
 ## 2. First run
 
-1. Open the deployed URL (e.g. `https://idm.example.com/admin/`).
-2. If the connection is not preconfigured, enter the Kanidm API URL
-   (**must end in `/v1`**, e.g. `https://idm.example.com/v1`) and the OIDC
-   client id on the login card — or use **Settings** after signing in.
-   Precedence: URL parameters > Settings (localStorage) > `js/config.js`
-   defaults. **Only public values are configurable; there is no secret.**
-3. Sign in with SSO or your passkey.
-4. Notice the 🔒 chip in the top bar — click it and step up **before**
-   your first write.
-5. Recommended immediately: **Settings → Idle sign-out** — set e.g. 10–15
-   minutes (0 = off, max 1440 = 24 h). On timeout Shenasa performs a full
-   sign-out, including the server session.
+1. Open the deployed URL (e.g. `https://idm.example.com/admin/` — trailing
+   slash required; `/admin` without it is redirected).
+2. If nothing is preconfigured, enter the API URL (**must end in `/v1`**)
+   on the login card, or use **Settings** after sign-in. Precedence:
+   URL query > Settings (localStorage) > `js/config.js`. Only public
+   values; there is no secret. `apiUrl` / redirect must be `https://` or
+   loopback `http://` — `javascript:`, `data:` and remote `http` are
+   dropped.
+3. Sign in with SSO or a passkey.
+4. Click the 🔒 chip and step up **before** the first write.
+5. Settings → **Idle sign-out**: 10–15 minutes is sane (0 = off, max
+   1440). Timeout signs out locally **and** on the server.
 
 ---
 
 ## 3. Page by page
 
+Nav items appear only when your roles allow them. Deep-linking a hidden
+page names the missing role instead of showing an empty shell.
+
 ### 3.1 Dashboard
 
-Live stat cards (total users, groups, active/expired accounts,
-passkey-only accounts), dependency-free SVG charts (account-status pie,
-members-per-group bars, passkey-adoption ring), your effective roles, and
-an **Audit logs** card pointing at the server journal — Kanidm 1.10 exposes
-no REST audit API, so Shenasa links to `journalctl -u kanidm`/your log
-pipeline instead of faking a page.
+Live stats (users, groups, active / not-yet-valid / expired,
+passkey-only), SVG charts, your roles, and a **domain** card from
+`GET /v1/domain` (omitted if you cannot read it).
 
-### 3.2 Users
+**Audit logs** is not a table. Kanidm has no REST audit API. The card
+points at the server journal (`docker logs shenasa-kanidm` /
+`journalctl`).
 
-- Search (name/display name/e-mail), filter by group, paginate.
-- **Create person**: username (server rule: `^[a-z][a-z0-9-_.]{0,63}$`,
-  starts with a letter, `root` and `dn=token` reserved), display name,
-  e-mail, optional validity window (`valid from` / `expires`).
-- **Edit**, **soft-delete** (goes to the recycle bin — see 3.5),
-  **CSV import**, **CSV/JSON export** (exports are formula-injection
-  hardened: cells starting with `= + - @` are prefixed with `'`).
-- PII fields (e-mail etc.) are gated on `idm_people_pii_read`.
+### 3.2 Users (`#/users`)
 
-### 3.3 User detail
+Roles: list is visible to people-admins / PII readers; create / delete /
+CSV import / onboard / bulk expiry need `idm_people_admins`. Bulk
+add-to-group also needs group-member rights.
 
-- Fields, groups (chip add/remove), validity window, passkey count.
-- **Reset credentials (service-desk flow)**: creates a one-time
-  credential-update intent (`GET /v1/person/{id}/_credential/_update_intent/{ttl}`)
-  and shows the link both as copyable text **and as a QR code** (Shenasa's
-  own dependency-free encoder). Hand the link/QR to the user over a
-  second channel; they land on Kanidm's audited credential manager and
-  enrol a new passkey/set a new password themselves. Shenasa — and you —
-  never see the credential.
-- **Passkey-only toggle**: raises `credential_type_minimum` so passwords
-  stop working for the account. The toggle refuses to arm if the account
-  has **no registered passkey** (lockout protection).
-- **Impersonation**: guidance for the audited CLI path; no silent
-  in-UI impersonation.
+- Search (name / display name), filter by group, paginate (15 per page).
+- **New user**: username (`^[a-z][a-z0-9-_.]{0,63}$`, starts with a
+  letter, `root` and `dn=token` reserved), display name, email, optional
+  valid-from / expiry.
+- **Onboard wizard**: person → optional baseline groups (`idm_*` and
+  `domain_admins` / `system_admins` excluded) → one-time credential
+  link + QR. Same endpoints as doing it by hand.
+- **CSV import**: header `name,displayname,mail`. Additive. Capped at
+  **2000** data rows. Failures listed after the run.
+- **CSV / JSON export** of the *current filter*. CSV cells starting
+  with `= + - @` (or tab/CR) get a leading `'` (spreadsheet
+  formula-injection).
+- **Bulk bar** (checkboxes survive pagination):
+  - *Add to group* — dry-run first (adds vs already members), then
+    **one** `POST /v1/group/{id}/_attr/member` with the whole add list.
+    `idm_*` groups are not offered.
+  - *Set / clear expiry* — dry-run table current → new. Clear sends
+    `account_expire: []` (Kanidm purge). Unchanged rows are skipped.
+- PII (email) is hidden without `idm_people_pii_read`.
+- Delete is a **soft** delete (recycle bin, 7 days).
 
-### 3.4 Groups
+### 3.3 User detail (`#/users/{name}`)
 
-- Search, nested-group filter, pagination; create/edit/delete ordinary
-  groups; members (add/remove persons); nested groups; `managed by`
-  (role-gated).
-- **Capability descriptions**: built-in `idm_*` role groups show what
-  membership actually grants (derived from the server's builtin ACPs);
-  custom groups show their own `description` attribute, editable in the
-  group dialog. **Use this — document every group you create.**
-- Denials explain Kanidm's real tiers (see §5): `idm_group_admins` manages
-  only ordinary groups; `idm_*` role groups are entry-managed by
-  `idm_admins`; system groups by `idm_access_control_admins`.
+- Fields, group chips (add/remove), validity, passkey count.
+- **Credential status** — `GET /v1/person/{id}/_credential/_status`.
+  Types: Password, GeneratedPassword, Passkey (enrolment labels),
+  PasswordMfa (TOTP labels, legacy security keys, backup-code count),
+  plus the credential UUID. Empty `{creds:[]}` is honest. 403 →
+  “restricted” (needs service-desk / people-admin ACPs). Secrets are
+  never fetched.
+- **Reset password / Passkey setup** — one-time intent
+  (`GET /v1/person/{id}/_credential/_update_intent/{ttl}`) shown as a
+  link and QR. The user finishes on Kanidm’s credential manager. You
+  never see the secret.
+- **Passkey-only** — sets `credential_type_minimum`. Refuses to arm if
+  the account has no passkey (lockout guard).
+- **Account recovery** — link to `<origin>/ui/recover`. There is **no**
+  admin “send recovery email” API. Availability is the domain toggle
+  in Settings (`domain_admins`).
+- **Impersonate** — points at the audited CLI; no silent in-UI
+  impersonation.
 
-### 3.5 Apps (OAuth2/OIDC clients)
+### 3.4 Groups (`#/groups`)
 
-Requires `idm_oauth2_admins`. One client per SSO application.
+- Search, nested-only filter, pagination.
+- Create / edit / delete ordinary groups. **No display name** — Kanidm
+  group ACPs reject `displayname` (a real 403). Use **Description**.
+- Capability column: builtin `idm_*` roles get a summary from the
+  server ACPs; custom groups show `description`.
+- **Export JSON** — `{format, version, generatedAt, groups:[{name,
+  members}]}`. Input of the Reports membership diff.
+- **Import membership CSV** — header `group,member,action` (`action`
+  optional, `add` or `remove`). Dry-run: add / remove / no-op /
+  conflict (unknown group, unknown member, bad action). Apply is one
+  request per (group, action). Capped at 2000 rows.
 
-- **List** with public/basic badges; **New client**: choose **public**
-  (browser/SPA/native — PKCE, no secret) or **basic** (server-side app —
-  authenticates with a client secret), client id (becomes the OIDC
-  `client_id`), display name, landing URL (https — Kanidm builds the
-  strict redirect list from it).
-- **Detail**: edit display name/landing; **Strict redirect URI** toggle
-  (keep ON — exact matching; off = prefix matching, legacy only);
-  **redirect origins** add/remove; **scope maps** / **supplementary scope
-  maps** / **claim maps** add-update-remove per group (e.g. give group
-  `app-users` the scopes `openid profile email groups`); **basic secret**
-  reveal for confidential clients (copy it into your vault — it is a
-  password for that application).
-- Deleting a client kills its sign-ins immediately — the danger zone asks
-  for confirmation.
+### 3.5 Group detail
 
-### 3.6 Service accounts
+Members (persons and nested groups), add/remove, managed-by,
+description, capability text. `idm_*` membership is `idm_admins` only;
+system groups are `idm_access_control_admins`. Ordinary groups are
+`idm_group_admins`.
 
-Requires `idm_service_account_admins`. One account per integration/robot,
-never a shared human account.
+### 3.6 Apps (`#/apps`) — summary
 
-- **New service account**: name, display name, and the required
-  **managed-by group** (the server rejects accounts without one).
-- **API tokens**: list shows label, read-only/read-write badge, issued
-  and expiry dates; **Issue token** — label, optional expiry (empty =
-  never expires; schedule rotation instead), read-write checkbox (grant
-  only when the integration truly writes), compact (shorter token for
-  header-size-limited systems). **The full token is shown exactly once** —
-  copy it or scan the QR into your vault immediately. **Delete** a token
-  to cut an integration's access instantly.
+Requires `idm_oauth2_admins`. Full contract: **[APPS.md](APPS.md)**.
 
-### 3.7 Recycle bin
+- One client per SSO application. **public (PKCE)** or **basic
+  (secret)**.
+- Create fields are **identical** for both types. The dropdown only
+  chooses `POST /v1/oauth2/_public` vs `_basic`. Kanidm does **not**
+  accept a secret on create; it generates one for basic clients.
+- After save: landing is PATCHed as `oauth2_rs_origin`, URL becomes
+  `#/apps/{id}`, basic secret is shown once.
+- Detail: edit display name / landing (not type), strict-redirect
+  toggle, redirect origins, scope / supplementary-scope / claim maps,
+  **Reveal basic secret**. Delete kills that app’s sign-in immediately.
+- Type cannot be changed later. Scope maps are not inferred — add them
+  or the token will not carry `groups` / the scopes the app asked for.
 
-- Lists soft-deleted entries (`GET /v1/recycle_bin`), **Revive** restores
-  by UUID (`POST /v1/recycle_bin/{id}/_revive`). Requires
-  `idm_recycle_bin_admins`.
-- **Retention: exactly 7 days.** Server-side constant
-  (`RECYCLEBIN_MAX_AGE = 7 * 86400`); the server purges on an internal
-  schedule. Kanidm 1.10 has **no REST endpoint to purge early** (not in
-  the web routes, not in the official client, not in the CLI) — so Shenasa
-  deliberately documents this instead of offering a dead button.
+### 3.7 Service accounts (`#/svcaccounts`)
 
-### 3.8 Sessions
+Requires `idm_service_account_admins`. One account per robot, never a
+shared human.
 
-Shows **your current session** decoded from `GET /v1/self/_uat`: token id,
-issued-at, expiry, purpose — including the **write window** state with its
-own unlock button like the top-bar chip. Kanidm 1.10 exposes no endpoint to
-list or revoke *other* sessions, so none is shown.
+- **New**: name, display name, **managed-by group** (server-required).
+- **API tokens**:
+  - List: label, read-only / read-write, issued, expiry (`never` if
+    unset).
+  - **Issue**: label, optional expiry date (empty = never — rotate on a
+    schedule instead), **Read-write (unchecked = read-only)**,
+    **Shorter token string** (same rights, shorter encoding for picky
+    `Authorization` headers).
+  - The full token is shown **exactly once** (copy + QR). It cannot be
+    read back. Lose it → issue another and delete the old one.
+  - Delete cuts that integration immediately.
 
-### 3.9 Profile (self-service)
+### 3.8 Recycle bin (`#/recycle`)
 
-Edit your own e-mail (role-gated), register an additional passkey
-(deep-link into Kanidm's credential manager), change password, view your
-groups and sign-in method.
+`GET /v1/recycle_bin`, revive `POST /v1/recycle_bin/{uuid}/_revive`.
+Needs `idm_recycle_bin_admins`. Retention **7 days**
+(`RECYCLEBIN_MAX_AGE`). No manual purge API exists — there is no purge
+button on purpose.
 
-### 3.10 Settings
+### 3.9 Sessions (`#/sessions`)
 
-Connection (apiUrl, OIDC client id/scope/redirect URI) with a **Test
-connection** button that queries the client's discovery document (which
-also proves the OAuth2 client exists), theme (light/dark/auto), **Idle
-sign-out** minutes, and a full reset of local overrides.
+Current session only (`GET /v1/self/_uat`): id, issued, expiry,
+purpose, write-window state + the same unlock control. No list/revoke
+of other sessions (no REST surface).
+
+### 3.10 Reports (`#/reports`)
+
+Visible to `idm_people_admins`. Computed in the browser from live
+reads. Nothing is stored on the server.
+
+1. **Accounts expiring within N days** — from `account_expire`. CSV
+   export uses real newlines and the formula-injection guard.
+2. **Passkey adoption per group** — one `_credential/_status` per
+   person member (concurrency 4). 403s counted as restricted, not
+   probed further. Nested groups skipped and reported.
+3. **Membership diff** — two group JSON exports chosen locally, never
+   uploaded.
+
+### 3.11 Profile (`#/profile`)
+
+Your identity, auth method, groups. Email edit needs
+`idm_people_self_mail_write`. Passkeys and password changes go to
+Kanidm’s own credential manager / `/ui/reset` — credentials never pass
+through Shenasa.
+
+### 3.12 Settings (`#/settings`)
+
+Requires sign-in.
+
+- Connection: `apiUrl` (…`/v1`), derived OAuth origin (read-only),
+  OIDC client id / scope / redirect. **Test connection** fetches that
+  client’s discovery document (proves the client exists).
+- Theme, idle timeout, optional **locale pack** code (`locales/<code>.json`;
+  core stays English).
+- Live **Kanidm version** + supported / not supported / not detected.
+- **Domain settings** (only `domain_admins` — **not** `idm_admins`):
+  domain display name, allow account self-recovery. `PUT
+  /v1/domain/_attr/{attr}` with a bare string array; booleans are
+  `"true"` / `"false"`.
+- Reset clears local overrides.
 
 ---
 
-## 4. Everyday operations cookbook
+## 4. Everyday operations
 
-### 4.1 Onboard a new employee
+### 4.1 Onboard a person
 
-1. 🔒 Step up (unlock write access).
-2. Users → **New person** → username per your naming standard, display
-   name, work e-mail, optional validity window.
-3. Open the user → add the baseline groups (see §5.4 example).
-4. **Reset credentials** → copy the link or show the QR → hand it to the
-   user over a verified second channel (in person, chat, MDM). They enrol
-   their own passkey.
-5. For privileged roles: require a **passkey**, then arm
-   **passkey-only** once ≥1 passkey is registered.
+1. Unlock write access.
+2. Users → **Onboard wizard** (or New user + groups + reset link).
+3. Hand the link/QR over a second channel. They enrol their own
+   passkey.
+4. For T0/T1: require a passkey, then arm **passkey-only** once ≥1
+   key is registered.
 
 ### 4.2 Lost password / lost passkey
 
-Same reset-intent flow (4.1 step 4). The link is single-purpose and
-time-boxed (TTL you choose); issuing a new one is safe — old intents are
-superseded.
+Same reset-intent as 4.1. Issuing a new link is safe.
 
 ### 4.3 Offboard
 
-1. Step up.
-2. Users → select → **Delete** (soft delete: the account stops working
-   immediately).
-3. If it was a mistake: Recycle bin → **Revive** — within **7 days**.
-4. After 7 days the server purges the entry permanently. For legal
-   retention keep your own export (Users → Export) before deleting.
+1. Unlock write access.
+2. Users → **Delete** (account stops immediately).
+3. Mistake → Recycle bin → **Revive** within 7 days.
+4. After 7 days the server purges. Export first if you need a record.
 
-### 4.4 Grant or revoke admin powers safely
+### 4.4 Grant or revoke admin powers
 
-1. Decide the **tier** first (§5), then the role group.
-2. Only `idm_admins` can edit `idm_*` role-group membership; only
-   `idm_access_control_admins` can touch system groups — plan who holds
-   those *before* you need it at 2 a.m.
-3. Grant by adding the person to the role group; the UI capability note on
-   the group reminds you what you just granted. Revoke by removing them.
-4. Changes apply on the server immediately; the affected user sees the new
-   powers at next sign-in (or token refresh).
+1. Pick the **tier** first (§5), then the role group.
+2. Only `idm_admins` edits `idm_*` membership; only
+   `idm_access_control_admins` touches system groups.
+3. Add/remove the person on the group page. Effect is immediate on the
+   server; the user sees it at next sign-in / token refresh.
 
-### 4.5 Bulk import (CSV)
+### 4.5 Register an SSO application
 
-Users → **Import CSV** — one person per row using the exported column
-layout. Import is additive; export first for a backup. Exported/imported
-cells are safe against spreadsheet formula injection.
+See **[APPS.md](APPS.md) §5**. Short version: unlock → Apps → New
+client (public vs basic) → copy basic secret if any → add every exact
+`redirect_uri` → add scope maps → point the app at
+`/oauth2/openid/<id>/.well-known/openid-configuration`.
+
+### 4.6 Issue a robot token
+
+Service accounts → open the account → **Issue API token**. Leave
+read-write **off** unless the integration writes. Copy once.
 
 ---
 
-## 5. RBAC & tiering best practice
+## 5. RBAC & tiering
 
-Everything in this section reflects **Kanidm 1.10's builtin access-control
-profiles** (`server/lib/src/migration_data/dl14/access.rs`), which Shenasa
-mirrors in its UI gates and group capability notes.
+Builtin ACPs: `server/lib/src/migration_data/dl14/access.rs` (dl15 is
+additive). Shenasa’s gates match these.
 
-### 5.1 The builtin roles (what membership actually grants)
+### 5.1 Builtin roles
 
 | Role group | Grants (summary) | Membership edited by |
 | --- | --- | --- |
-| `idm_access_control_admins` | Modify access control itself; manage **system-level** groups | itself / system |
-| `idm_admins` | Entry-manager of the `idm_*` **role groups** — and nothing else by default! Not people, not groups, not PII | `idm_admins` |
-| `idm_people_admins` | Create/modify/delete persons, account lifecycle | `idm_admins` |
-| `idm_people_pii_read` | Read PII attributes (e-mail, …) | `idm_admins` |
-| `idm_people_self_mail_write` | Users may change their own e-mail | `idm_admins` |
-| `idm_group_admins` | Create/modify/delete **ordinary** groups and their members | `idm_admins` |
-| `idm_service_desk` | Service-desk powers (credential-reset intents, …) | `idm_admins` |
-| `idm_recycle_bin_admins` | Search/revive recycle bin | `idm_admins` |
-| `idm_oauth2_admins` | Manage OAuth2/OIDC clients (your ~50 apps) | `idm_admins` |
-| `idm_schema_admins`, `idm_high_privilege`, … | System/schema level | `idm_access_control_admins` |
+| `idm_access_control_admins` | Access control; **system-level** groups | itself / system |
+| `idm_admins` | Entry-manager of `idm_*` **role groups** — and nothing else by default. Not people, not groups, not PII | `idm_admins` |
+| `idm_people_admins` | Create/modify/delete persons | `idm_admins` |
+| `idm_people_pii_read` | Read PII | `idm_admins` |
+| `idm_people_self_mail_write` | Change own email | `idm_admins` |
+| `idm_group_admins` | Ordinary groups and their members | `idm_admins` |
+| `idm_service_desk` | Credential-reset intents | `idm_admins` |
+| `idm_recycle_bin_admins` | List/revive recycle bin | `idm_admins` |
+| `idm_oauth2_admins` | OAuth2/OIDC clients | `idm_admins` |
+| `idm_service_account_admins` | Service accounts and API tokens | `idm_admins` |
+| `domain_admins` | Domain display name + recovery toggle. `idm_admins` is **not** nested here | system / `system_admins` |
+| `idm_schema_admins`, `idm_high_privilege`, … | System/schema | `idm_access_control_admins` |
 
-The single most common misunderstanding: **`idm_admins` is not
-all-powerful.** Its only builtin power is curating the role groups. A 403
-for an `idm_admins` member doing people work is *correct* server behaviour
-— grant `idm_people_admins` too. (And remember §1.2: no role helps while
-the session is read-only — step up first.)
+**`idm_admins` is not all-powerful.** A 403 for an `idm_admins` member
+doing people work is correct — also grant `idm_people_admins`. And
+step up first (§1.2).
 
-### 5.2 Recommended tiering model
+### 5.2 Recommended tiers
 
-Adapted from the classic AD tiering to Kanidm's builtin roles:
+| Tier | Purpose | Groups | Account style |
+| --- | --- | --- | --- |
+| **T0** | Protect the IdM | `idm_access_control_admins`, `idm_schema_admins`; `idm_admin` recovery offline | Dedicated `a-` accounts, passkey-only, hardware keys |
+| **T1** | Role curation + people/groups | `idm_admins` plus people/group admins as needed | Dedicated `a-` accounts, passkey-only |
+| **T2** | Helpdesk, apps, recycle, PII read | `idm_service_desk`, `idm_oauth2_admins`, `idm_recycle_bin_admins`, `idm_people_pii_read` | Daily account OK for helpdesk; passkey recommended |
+| **T3** | Workforce | Ordinary `app-*` / `dept-*` | Daily accounts |
 
-| Tier | Purpose | Kanidm groups | Account style | Typical headcount |
-| --- | --- | --- | --- | --- |
-| **T0 — Control plane** | Protect the IdM itself: access control, schema, recovery | `idm_access_control_admins`, `idm_schema_admins` (and hold `idm_admin` recovery credentials offline) | Dedicated `a-` admin accounts, passkey-only, hardware keys | 2–3 |
-| **T1 — Identity admins** | Role curation + people/groups lifecycle | `idm_admins`, plus `idm_people_admins` / `idm_group_admins` as needed | Dedicated `a-` accounts, passkey-only | 3–6 |
-| **T2 — Application & helpdesk** | Service desk, OAuth2 clients, recycle bin, PII read | `idm_service_desk`, `idm_oauth2_admins`, `idm_recycle_bin_admins`, `idm_people_pii_read` | Can be the daily account for helpdesk; passkey strongly recommended | 5–20 |
-| **T3 — Workforce** | Ordinary users of the ~50 apps | Ordinary business groups (`app-*`, `dept-*`) managed by T1/T2 | Daily accounts | everyone |
+### 5.3 Hard rules
 
-### 5.3 Hard rules (adopt as policy)
+1. Separate admin identities from daily ones.
+2. Passkey-only for T0/T1 after ≥1 hardware key (keep a spare enrolled).
+3. Least privilege, additive grants.
+4. Never nest an ordinary group *into* an `idm_*` role group.
+5. Recycle-bin admin is its own grant — revive restores privileges too.
+6. OAuth2 admin ≠ people admin. Keep `idm_oauth2_admins` tiny; keep
+   strict redirect on.
+7. `idm_access_control_admins` is break-glass. 2–3 named humans.
+8. Protect `idm_admin` recovery (printed by bootstrap; rotated on each
+   setup run).
+9. Recertify `idm_*` membership quarterly (Groups → Export JSON +
+   Reports diff).
+10. Do not bypass the write window.
 
-1. **Separate admin from daily identities.** T0/T1 work happens through
-   dedicated accounts (e.g. `a-mmirzamohammadi`); the daily account has no
-   builtin role membership at all.
-2. **Passkey-only for anything T0/T1** (arm the passkey-only toggle after
-   enrolling ≥1 hardware passkey; keep a second key enrolled as backup).
-3. **Least privilege, additive grants.** Grant the *smallest* role set for
-   the task (`idm_people_pii_read` alone for an HR reporting account,
-   never `idm_people_admins`). You can always add.
-4. **Never nest an ordinary group *into* an `idm_*` role group** to "make
-   it easier" — that silently promotes every member, including nested
-   transitivity. Grant individual accounts instead.
-5. **Recycle-bin admin is its own grant.** Neither `idm_admins` nor
-   `idm_people_admins` can revive deletions; keep
-   `idm_recycle_bin_admins` with a small, deliberate set (T1 + on-call
-   T2), because revive restores privileges too.
-6. **OAuth2 client admin != people admin.** With ~50 SSO apps, one
-   mis-clicked redirect URI is a breach. Keep
-   `idm_oauth2_admins` tiny and require strict redirect URIs
-   (Shenasa's own client is the template).
-7. **`idm_access_control_admins` is break-glass territory.** 2–3 named
-   humans, hardware keys, and a membership review on a calendar. Never a
-   shared account.
-8. **Protect the recovery path.** The `idm_admin` generated password
-   (printed by bootstrap) is full control. Rotate on each setup run (the
-   deploy scripts do), store in your vault, test quarterly.
-9. **Membership recertification.** Quarterly: export group membership for
-   all `idm_*` groups (Groups → export or `kanidm group list-members`),
-   diff against the approved list.
-10. **Write actions need the step-up window** — that is a *feature*
-    (limits the blast radius of a stolen unlocked browser). Do not work
-    around it; plan ~10-minute write batches.
+### 5.4 Example (~2000 users)
 
-### 5.4 Example delegation for a ~2000-user org
+| Duty | Group(s) |
+| --- | --- |
+| Platform / ACP / schema | `idm_access_control_admins`, `idm_schema_admins` |
+| Role curation + lifecycle | `idm_admins` + `idm_people_admins` + `idm_group_admins` |
+| Resets, on-call revive | `idm_service_desk` (+ `idm_recycle_bin_admins`) |
+| App onboarding | `idm_oauth2_admins` |
+| HR reporting | `idm_people_pii_read` via a service account |
+| Business access | `dept-*`, `app-*` with a written Description |
 
-| Duty | Group(s) | Who |
-| --- | --- | --- |
-| IdM platform ownership, ACP/schema/HA | `idm_access_control_admins`, `idm_schema_admins` | 2 senior engineers, `a-` accounts |
-| Role curation & user lifecycle | `idm_admins` + `idm_people_admins` + `idm_group_admins` | IAM team leads, `a-` accounts |
-| Password/passkey resets, off-hours | `idm_service_desk` (+ `idm_recycle_bin_admins` for on-call) | Helpdesk (daily accounts OK) |
-| App onboarding, redirect URIs, scopes | `idm_oauth2_admins` | App integration team |
-| HR reporting (read-only PII) | `idm_people_pii_read` via service account | HR analytics |
-| Business access | `dept-*`, `app-*` ordinary groups (document each via the group Description field!) | T1/T2 maintain |
-
-### 5.5 When you get a 403 — decision tree
+### 5.5 403 decision tree
 
 ```
 HTTP 403 on a write?
-├─ Top-bar chip shows 🔒 read-only?
-│   └─ YES → Click "Unlock write access", touch passkey, retry.
-│            (Session scope gate — before roles are even checked.)
+├─ Chip shows 🔒 read-only?
+│   └─ YES → Unlock write access, retry.
 └─ Chip shows ✍ writes active?
-    ├─ Working on persons/PII?   → need idm_people_admins (+ idm_people_pii_read for PII)
-    ├─ Ordinary group edit?      → need idm_group_admins
-    ├─ idm_* role-group members? → need idm_admins
-    ├─ System group/schema?      → need idm_access_control_admins
-    ├─ Recycle bin?              → need idm_recycle_bin_admins
-    └─ OAuth2 clients?           → need idm_oauth2_admins
+    ├─ Persons / PII?            → idm_people_admins (+ pii_read)
+    ├─ Ordinary group?           → idm_group_admins
+    ├─ idm_* role membership?    → idm_admins
+    ├─ System group / schema?    → idm_access_control_admins
+    ├─ Recycle bin?              → idm_recycle_bin_admins
+    ├─ OAuth2 clients?           → idm_oauth2_admins
+    ├─ Service accounts / tokens?→ idm_service_account_admins
+    └─ Domain settings?          → domain_admins
 ```
-
-Shenasa's error toasts walk you through exactly this tree inline.
 
 ---
 
-## 6. Security hygiene for operators
+## 6. Operator hygiene
 
-- Set **Idle sign-out** (Settings) on every admin workstation — 10–15 min
-  is a sane default; the timeout signs out *server-side* too.
-- Prefer **Sign out** over closing the tab when finished; it destroys the
-  Kanidm web session so SSO cannot silently re-enter.
-- Lock your OS session — the write window is bearer-equivalent.
-- Don't share admin accounts; Kanidm's audit log attributes every write to
-  a person — keep that useful.
-- Review the **Sessions** page occasionally: it shows the token id,
-  issued/expiry and purpose of your live session.
+- Idle sign-out 10–15 min on every admin workstation.
+- Prefer **Sign out** over closing the tab.
+- Lock the OS while a write window is open (bearer-equivalent).
+- Do not share admin accounts.
+- Check Sessions occasionally (token id, purpose, window).
 
-## 7. Troubleshooting quick list
+## 7. Troubleshooting
 
 | Symptom | Cause → fix |
 | --- | --- |
-| 401 right after SSO sign-in | Old build sent the OIDC access token to `/v1` — upgrade; v1.0.0 uses the web-session cookie. |
-| 403 on *every* write, roles correct | Read-only session → **Unlock write access** (§1.2). |
-| Buttons hidden you think you should have | Reload once (roles refresh from `/v1/self`); else you truly lack the role (§5.5). |
-| `m.mirzamohammadi` rejected | Old validator; fixed — dots are legal (`INAME_RE`). |
-| Passkey prompt never appears | Browser/platform without WebAuthn, non-HTTPS origin, or clock skew. |
-| Sign back in instantly after sign-out | You hit an old build whose sign-out kept the server cookie; redeploy + Ctrl+F5. |
-| Nothing loads after upgrade | Hard refresh (Ctrl+F5): the SPA is cache-busted but browsers love stale HTML. |
-| Need audit events | Kanidm 1.10 has no REST audit API — read the server journal/log pipeline (Dashboard card links there). |
+| 401 right after SSO | Old build sent the OIDC access token to `/v1`. Upgrade. |
+| 403 on *every* write, roles correct | Read-only session → Unlock write access. |
+| Buttons missing | Reload once; else you lack the role (§5.5). |
+| `m.mirzamohammadi` rejected | Old validator; dots are legal. |
+| Passkey prompt never appears | No WebAuthn, non-HTTPS, or clock skew. |
+| Signed back in instantly after sign-out | Old build kept the server cookie. Redeploy + Ctrl+F5. |
+| Blank page at `/admin` | Need `/admin/`. v1.3 configs redirect. |
+| Apps dropdown “does nothing” | Fields are supposed to stay the same. [APPS.md](APPS.md). |
+| SSO redirect mismatch after creating a client | Origin missing or not exact. Add the callback. Clients created before this release did not auto-PATCH origin. |
+| Need audit events | No REST API — server journal. |
+| Settings 403 / missing domain editor | `domain_admins`, not `idm_admins`. |

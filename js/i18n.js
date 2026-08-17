@@ -37,6 +37,9 @@
 
     'common.search': 'Search',
     'common.create': 'Create',
+    'common.next': 'Next',
+    'common.skip': 'Skip',
+    'common.unknown': 'Unknown',
     'common.edit': 'Edit',
     'common.delete': 'Delete',
     'common.save': 'Save',
@@ -81,6 +84,7 @@
     'error.403.readonly': 'Your session is read-only, so Kanidm denied the write. Click "Unlock write access" in the top bar (one passkey verification), then retry.',
     'error.403.oauth2': 'OAuth2/OIDC clients are managed exclusively by the idm_oauth2_admins role (builtin ACPs idm_acp_oauth2_manage{,_basic} — idm_admins has no power here either).',
     'error.403.svcaccounts': 'Service accounts and their API tokens require the idm_service_account_admins role (builtin ACPs idm_acp_service_account_{create,manage,delete}).',
+    'error.403.domain': 'Domain settings require the domain_admins role (builtin ACP idm_acp_domain_admin — note: idm_admins is NOT included upstream).',
 
     // ---- Apps (OAuth2/OIDC clients), v1.1 ------------------------------
     'nav.apps': 'Apps',
@@ -99,6 +103,8 @@
     'apps.delete.confirm': 'Delete OAuth2 client "{name}"? Applications using it for SSO will lose sign-in immediately.',
     'apps.field.type': 'Client type',
     'apps.field.type.help': 'public = browser/native apps with PKCE (no secret). basic = server-side apps with a client secret.',
+    'apps.field.type.live.public': 'No client secret. The app must use PKCE (S256). The form fields stay the same — this only picks POST /v1/oauth2/_public.',
+    'apps.field.type.live.basic': 'Kanidm generates the client secret. There is no secret field and no secret tab on this form (Kanidm never accepts a secret on create). After Save you go to the app page and the secret is shown once — copy it then. Later use Reveal basic secret (GET /v1/oauth2/{id}/_basic_secret).',
     'apps.type.public': 'public (PKCE)',
     'apps.type.basic': 'basic (secret)',
     'apps.field.name': 'Client ID',
@@ -136,7 +142,8 @@
     'apps.secret.warning': 'Copy it now and store it in your vault — treat it like a password; anyone with it can act as this application.',
     'apps.origins': 'Redirect origins',
     'apps.origins.help': 'Exact https redirect URIs accepted for this client (strict matching). Add/remove entries; changes apply immediately.',
-    'apps.origins.empty': 'None — the landing URL is implied. Add extra callbacks here.',
+    'apps.origins.empty': 'None listed. With strict redirect on, authorize requests fail until you add the exact callback URI here.',
+    'apps.origin.autoFailed': 'Client created, but adding the landing URL as a redirect origin failed. Add it under Redirect origins or SSO will reject the callback (strict redirect is on).',
     'apps.origins.add': 'Add URI',
     'apps.origins.duplicate': 'That URI is already listed.',
 
@@ -175,10 +182,10 @@
     'svc.tokens.expiry': 'Expiry',
     'svc.tokens.never': 'never',
     'svc.tokens.expiry.help': 'Optional — empty means the token never expires (rotating on schedule is recommended).',
-    'svc.tokens.rwAsk': 'Grant read-write access',
-    'svc.tokens.rwHelp': 'Read-write tokens can modify the directory as this account. Prefer read-only wherever possible.',
-    'svc.tokens.compact': 'Compact token',
-    'svc.tokens.compact.help': 'Shorter token for systems with strict header-size limits; carry the same power.',
+    'svc.tokens.rwAsk': 'Read-write (unchecked = read-only)',
+    'svc.tokens.rwHelp': 'Off (recommended): the token can only read the directory. On: the token can create, edit and delete as this service account — use only for integrations that must write.',
+    'svc.tokens.compact': 'Shorter token string',
+    'svc.tokens.compact.help': 'Same permissions, just a shorter token. Turn this on only if the client rejects long Authorization headers. Leave off otherwise.',
     'svc.tokens.delete.confirm': 'Delete API token "{label}"? Integrations using it lose access immediately.',
 
     'dash.domain': 'Domain',
@@ -204,6 +211,13 @@
 
     'users.title': 'Users',
     'users.new': 'New user',
+    'users.onboard': 'Onboard wizard',
+    'users.onboard.title': 'Onboard a new person',
+    'users.onboard.step1': 'Create the person.',
+    'users.onboard.step2': 'Add baseline groups (optional).',
+    'users.onboard.step3': 'Share the first-sign-in link.',
+    'users.onboard.created': 'Person created: {name}',
+    'users.onboard.share': 'Share this one-time credential link with the user — they set their own password/passkey on the identity server:',
     'users.searchPlaceholder': 'Search by name or display name…',
     'users.filterGroup': 'Filter by group',
     'users.importCsv': 'Import CSV',
@@ -230,6 +244,19 @@
     'user.detail.addGroup': 'Add to group…',
     'user.detail.resetPassword': 'Reset password',
     'user.detail.registerPasskey': 'Passkey setup (credential-reset link)',
+    'user.creds.title': 'Credential status',
+    'user.creds.none': 'No credentials set yet — issue a credential-reset link to bootstrap them.',
+    'user.creds.password': 'Password',
+    'user.creds.generatedPassword': 'Generated password',
+    'user.creds.passkey': 'Passkey',
+    'user.creds.mfa': 'Password + MFA',
+    'user.creds.totp': 'TOTP',
+    'user.creds.securityKey': 'Legacy security key',
+    'user.creds.backupCodes': '{count} backup code(s)',
+    'user.creds.restricted': 'Hidden — credential status needs the service-desk or people-admin role.',
+    'user.recovery.title': 'Account recovery',
+    'user.recovery.hint': 'Kanidm exposes no admin API to email a recovery link — recovery is user self-service on the identity server (works when the domain allows it):',
+    'user.recovery.open': 'Open the recovery page on the identity server ↗',
     'user.detail.impersonate': 'Impersonate (support)',
     'user.detail.passkeyOnly': 'Require passkey-only authentication',
     'user.detail.passkeyCount': 'Registered passkeys',
@@ -282,6 +309,7 @@
     'role.desc.idm_unix_admins': 'Manages unix/posix extensions of accounts and groups.',
     'role.desc.idm_radius_admins': 'Manages RADIUS service accounts and secrets.',
     'role.desc.idm_service_account_admins': 'Manages service accounts and their API tokens.',
+    'role.desc.domain_admins': 'Manages domain identity settings (display name, account recovery toggle) — separate from idm_admins.',
     'role.desc.idm_application_admins': 'Manages registered applications.',
     'role.desc.idm_mail_admins': 'Manages mail service accounts.',
     'role.desc.idm_message_admins': 'Manages message service accounts.',
@@ -330,6 +358,11 @@
     'settings.redirect': 'OIDC redirect URI',
     'settings.theme': 'Theme',
     'settings.theme.light': 'Light',
+    'settings.domain.title': 'Domain settings',
+    'settings.domain.displayName': 'Domain display name',
+    'settings.domain.allowRecovery': 'Allow account self-recovery',
+    'settings.domain.allowRecovery.help': 'Enables Kanidm\u2019s email-based recovery flow at /ui/recover on the identity domain (domain_allow_account_recovery).',
+    'settings.domain.saved': 'Domain settings saved.',
     'settings.theme.dark': 'Dark',
     'settings.theme.auto': 'Auto (system)',
     'settings.test': 'Test connection',
@@ -346,8 +379,105 @@
     'settings.serverVersion.help': 'Read live from the server\'s X-KANIDM-VERSION response header after any request. This release of Shenasa supports Kanidm:',
     'settings.compat.supported': 'supported',
     'settings.compat.unsupported': 'NOT supported — see README compatibility table',
-    'settings.compat.unknown': 'not detected yet'
+    'settings.compat.unknown': 'not detected yet',
+
+    // ---- Bulk operations (users page) ----------------------------------
+    'nav.reports': 'Reports',
+    'users.selected': '{n} selected',
+    'users.bulk.addGroup': 'Add to group…',
+    'users.bulk.expiry': 'Set expiry…',
+    'users.bulk.clear': 'Clear selection',
+    'users.select.all': 'Select all {n} filtered users',
+    'users.select.row': 'Select {name}',
+    'bulk.dryRun': 'Dry run',
+    'bulk.dryRun.help': 'Dry run only reads server state and shows exactly what would change — nothing is modified until you apply.',
+    'bulk.apply': 'Apply changes',
+    'bulk.report.adds': 'Will be added ({n})',
+    'bulk.report.skips': 'Already members — skipped ({n})',
+    'bulk.report.noop': 'No changes needed.',
+    'bulk.failures': 'Failures',
+    'bulk.done': 'Done: {ok} applied, {fail} failed.',
+    'bulk.addGroup.title': 'Add {n} user(s) to a group',
+    'bulk.addGroup.group': 'Target group',
+    'bulk.expiry.title': 'Set account expiry for {n} user(s)',
+    'bulk.expiry.date': 'New expiry date',
+    'bulk.expiry.clear': 'Remove expiry (accounts never expire)',
+    'bulk.expiry.pick': 'Pick a date or tick “remove expiry”.',
+    'bulk.col.user': 'User',
+    'bulk.col.current': 'Current expiry',
+    'bulk.col.new': 'New expiry',
+    'bulk.unchanged': 'unchanged',
+
+    // ---- Group membership CSV import (groups page) ---------------------
+    'groups.exportJson': 'Export JSON',
+    'groups.importMembers': 'Import membership CSV',
+    'gimport.title': 'Group membership import',
+    'gimport.help': 'CSV header: group,member,action — action is optional and is add (default) or remove. Members may be persons or other groups. The dry run shows adds, removes, no-ops and conflicts BEFORE anything is written.',
+    'gimport.col.group': 'Group',
+    'gimport.col.member': 'Member',
+    'gimport.col.action': 'Action',
+    'gimport.col.reason': 'Details',
+    'gimport.add': 'add',
+    'gimport.remove': 'remove',
+    'gimport.skip': 'no-op',
+    'gimport.conflict': 'conflict',
+    'gimport.reason.okAdd': 'will be added',
+    'gimport.reason.okRemove': 'will be removed',
+    'gimport.reason.alreadyMember': 'already a member',
+    'gimport.reason.notMember': 'not a member',
+    'gimport.reason.unknownGroup': 'unknown group',
+    'gimport.reason.unknownMember': 'unknown person or group',
+    'gimport.reason.badAction': 'action must be add or remove',
+    'gimport.summary': 'Dry run: {adds} add(s), {removes} remove(s), {skips} no-op(s), {conflicts} conflict(s).',
+    'gimport.applied': 'Applied: {ok} group request(s) succeeded, {fail} failed.',
+    'gimport.noChanges': 'No effective changes to apply.',
+
+    // ---- Governance reports ---------------------------------------------
+    'reports.title': 'Governance reports',
+    'reports.help': 'Reports are computed client-side from live API reads; nothing is stored server-side.',
+    'reports.expiring.title': 'Accounts expiring soon',
+    'reports.expiring.days': 'Within (days)',
+    'reports.expiring.run': 'Run',
+    'reports.expiring.col.name': 'Account',
+    'reports.expiring.col.expires': 'Expires',
+    'reports.expiring.col.daysLeft': 'Days left',
+    'reports.expiring.none': 'No accounts expire within {n} day(s).',
+    'reports.expiring.export': 'Export CSV',
+    'reports.passkey.title': 'Passkey-only adoption per group',
+    'reports.passkey.help': 'Reads every person member’s credential status — one API call per person. Accounts you may not inspect (missing the credential-reset permission) are counted separately and never probed further.',
+    'reports.passkey.group': 'Group',
+    'reports.passkey.run': 'Run report',
+    'reports.passkey.progress': 'Checked {done}/{total}…',
+    'reports.passkey.persons': '{n} person member(s) analysed',
+    'reports.passkey.nonPerson': '{n} non-person member(s) skipped (nested groups).',
+    'reports.passkey.stat.passkeyOnly': 'Passkey-only',
+    'reports.passkey.stat.withPasskey': 'Passkey + other',
+    'reports.passkey.stat.noPasskey': 'No passkey',
+    'reports.passkey.stat.none': 'No credential',
+    'reports.passkey.stat.restricted': 'Restricted (403)',
+    'reports.diff.title': 'Membership diff between two exports',
+    'reports.diff.help': 'Compare two group JSON exports (Groups page → Export JSON) — for example last month’s vs today’s — to review role-group membership changes. Files are parsed locally in the browser, never uploaded.',
+    'reports.diff.old': 'Older export',
+    'reports.diff.new': 'Newer export',
+    'reports.diff.run': 'Diff',
+    'reports.diff.col.group': 'Group',
+    'reports.diff.col.added': 'Members added',
+    'reports.diff.col.removed': 'Members removed',
+    'reports.passkey.col.class': 'Class',
+    'reports.diff.noChanges': 'No membership changes between the two exports.',
+    'reports.diff.badFile': 'Could not parse {file} as a Shenasa group export.',
+    'reports.diff.groupOnlyNew': 'only in newer export',
+    'reports.diff.groupOnlyOld': 'only in older export',
+    'reports.expired': 'expired',
+
+    // ---- Optional locale packs ------------------------------------------
+    'settings.locale': 'Language pack (locale code)',
+    'settings.locale.help': 'Default “en”. To use a community pack, place locales/<code>.json next to the UI files and set the code here (e.g. de, fa). Applied after reload; unknown keys fall back to English. The audited core stays English-only.',
+    'settings.locale.missing': 'Language pack could not be loaded — staying on English.',
+    'app.skip': 'Skip to content'
   };
+
+  var currentLocale = 'en';
 
   function t(key, vars) {
     var s = Object.prototype.hasOwnProperty.call(STRINGS, key) ? STRINGS[key] : key;
@@ -361,6 +491,50 @@
     return s;
   }
 
+  // ---- Optional external locale packs -----------------------------------
+  // The audited core ships English-only. A deployment MAY place a community
+  // pack at locales/<lang>.json — a flat {"key": "string"} object over the
+  // same keys — and set the `locale` config option. The pack is fetched
+  // same-origin (connect-src 'self') and merged OVER the English strings,
+  // so missing keys fall back to English. Only keys that already exist in
+  // the English table and only string values are honoured: packs are data,
+  // never code.
+  function applyPack(data) {
+    if (!data || typeof data !== 'object') return 0;
+    var n = 0;
+    for (var k in data) {
+      if (Object.prototype.hasOwnProperty.call(STRINGS, k) && typeof data[k] === 'string') {
+        STRINGS[k] = data[k];
+        n++;
+      }
+    }
+    return n;
+  }
+
+  async function loadPack(lang) {
+    currentLocale = 'en';
+    if (!lang || lang === 'en') return false;
+    if (!/^[a-zA-Z]{2,3}(-[a-zA-Z0-9]{2,8})*$/.test(lang)) {
+      throw new Error('invalid locale code: ' + lang);
+    }
+    var res = await global.fetch('locales/' + encodeURIComponent(lang) + '.json', {
+      headers: { 'Accept': 'application/json' },
+      credentials: 'same-origin'
+    });
+    if (!res.ok) {
+      throw new Error('locale pack not found: ' + lang + ' (HTTP ' + res.status + ')');
+    }
+    var data = await res.json();
+    applyPack(data);
+    currentLocale = lang;
+    return true;
+  }
+
   global.ShenaStrings = STRINGS;
+  global.ShenaI18n = {
+    applyPack: applyPack,
+    loadPack: loadPack,
+    current: function () { return currentLocale; }
+  };
   global.t = t;
 })(typeof window !== 'undefined' ? window : globalThis);

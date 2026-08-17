@@ -123,7 +123,7 @@ write_caddyfile() {
 }
 
 (spa_csp) {
-	header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+	header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 }
 EOF
   if [ "$TWO_DOMAIN" = "0" ]; then
@@ -133,7 +133,13 @@ EOF
 https://$DOMAIN {
 	import security_headers
 
-	@admin path /admin /admin/*
+	# The SPA uses relative asset paths, so it only works with the trailing
+	# slash. Without this redirect, "/admin" renders a blank page (assets
+	# resolve to /js/... and 404 on the Kanidm proxy). redir sorts before
+	# handle in Caddy's default directive order.
+	redir /admin /admin/ 308
+
+	@admin path /admin/*
 	handle @admin {
 		import spa_csp
 		uri strip_prefix /admin

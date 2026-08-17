@@ -47,6 +47,7 @@
       { hash: '#/dashboard', label: t('nav.dashboard'), show: true },
       { hash: '#/users', label: t('nav.users'), show: global.Store.canManagePeople() || global.Store.canReadPii() },
       { hash: '#/groups', label: t('nav.groups'), show: global.Store.canManageGroups() || global.Store.canEditGroupMembers() || global.Store.canManagePeople() },
+      { hash: '#/reports', label: t('nav.reports'), show: global.Store.canManagePeople() },
       { hash: '#/apps', label: t('nav.apps'), show: global.Store.canManageOauth2() },
       { hash: '#/svcaccounts', label: t('nav.svcaccounts'), show: global.Store.canManageServiceAccounts() },
       { hash: '#/recycle', label: t('nav.recycle'), show: global.Store.canRecycleBin() },
@@ -229,7 +230,8 @@
       '<span class="topbar-user">' + esc(user.display_name || user.name || '') + '</span>' +
       '</header>';
 
-    root.innerHTML = topbar + '<div class="layout">' + nav + '<main class="content" id="view" tabindex="-1"></main></div>';
+    root.innerHTML = '<a class="skip-link" href="#view">' + esc(t('app.skip')) + '</a>' +
+      topbar + '<div class="layout">' + nav + '<main class="content" id="view" tabindex="-1"></main></div>';
 
     var toggle = root.querySelector('[data-nav-toggle]');
     toggle.addEventListener('click', function () {
@@ -272,7 +274,9 @@
   function route() {
     var hash = global.location.hash || '#/dashboard';
     var path = hash.replace(/^#\/?/, '');
-    var seg = path.split('/').map(decodeURIComponent);
+    var seg = path.split('/').map(function (s) {
+      try { return decodeURIComponent(s); } catch (e) { return s; }
+    });
 
     if (seg[0] === 'login') { renderLogin(); return; }
     // Every application page — Settings included — requires an
@@ -301,6 +305,7 @@
       case 'recycle': return void global.Pages.recycle(main);
       case 'sessions': return void global.Pages.sessions(main);
       case 'profile': return void global.Pages.profile(main);
+      case 'reports': return void global.Pages.reports(main);
       case 'settings': return void global.Pages.settings(main);
       default:
         global.location.hash = '#/dashboard';
@@ -396,6 +401,12 @@
   // ----------------------------------------------------------------------
   async function boot() {
     App.applyTheme();
+    // Optional community locale pack (locales/<code>.json). Failures are
+    // non-fatal — the English core stays on and Settings reports it.
+    try {
+      var loc = global.ShenaConfig.locale ? global.ShenaConfig.locale() : '';
+      if (loc && loc !== 'en') await global.ShenaI18n.loadPack(loc);
+    } catch (e) { _localePackError = e; }
     global.Store.restore();
     // Re-hydrate the server-side write window after a page reload (not
     // persisted in sessionStorage — re-fetched from /v1/self/_uat).
@@ -425,6 +436,8 @@
     route();
   }
 
+  var _localePackError = null;
+  App.localePackError = function () { return _localePackError; };
   App.route = route;
   App.renderLogin = renderLogin;
   App.boot = boot;

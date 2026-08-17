@@ -1,7 +1,11 @@
 # Releasing Shenasa (maintainer guide)
 
-How to cut a release and publish it on GitHub. For v1.1.0 the exact
-commands and the ready-to-paste release text are in §3.
+How to cut a release and publish it on GitHub.
+
+**Current tag to publish: v1.3.0.** Exact title, About text, commit,
+tag message and release notes are in
+[`docs/GITHUB-RELEASE-v1.3.0.md`](GITHUB-RELEASE-v1.3.0.md). GitHub
+still only has `v1.0.0` and `v1.1.0`. Do not also create `v1.3.1`.
 
 Repository: <https://github.com/mirzamohamadi/shenasa>
 
@@ -242,3 +246,131 @@ real-Kanidm integration, npm audit) · MIT.
   GitHub private vulnerability reporting instead of public issues.
 - Next release: bump `package.json`, add a dated CHANGELOG section, keep
   `[Unreleased]` for ongoing work, repeat §1–2.
+
+---
+
+## 4. v1.3.0 — the exact release
+
+House state as shipped: `package.json` version `1.3.0`, changelog section
+`[1.3.0] - 2026-08-08` (on top of `[1.1.0]` and `[1.0.0]`), 67/67
+self-tests green, deploy pins `kanidm/server:1.11.0` (1.10.5 verified
+alternative), CI integration matrix runs BOTH pins. The v1.2 tag is
+skipped by product decision: the combined v1.2+v1.3 milestones ship as
+this one release.
+
+### Commit
+
+Title:
+
+```
+Shenasa v1.3.0 — bulk ops, governance reports, CSP tightened & lifecycle depth (Kanidm 1.10/1.11)
+```
+
+Body:
+
+```
+v1.3.0 ships the roadmap's v1.2 "Operations at scale" and v1.3 "Deeper
+lifecycle" milestones as ONE release (the v1.2 tag is skipped by product
+decision), with every feature verified against the exact upstream sources
+of kanidm/kanidm v1.10.5 and v1.11.0.
+
+Operations at scale:
+- Bulk user actions with mandatory dry-run: add-to-group (ONE batched
+  _attr/member POST; idm_* role groups excluded) and set/clear expiry
+  (per-user preview; clear = empty-array purge per ModifyList::from_patch).
+- Group-membership CSV import with a dry-run adds/removes/no-ops/conflicts
+  report and per-(group, action) batched apply.
+- Governance reports page: accounts expiring within N days (+ CSV),
+  passkey-only adoption per group (bounded fan-out of _credential/_status,
+  403-tolerant), client-side membership diff of two group JSON exports.
+- Performance: in-flight GET de-duplication; windowed rendering proven at
+  5k+ entries (5004 people → 15 DOM rows, 334 pages, self-tested).
+- CSP: style-src drops 'unsafe-inline' everywhere (meta + all deploy
+  configs); guard tests scan every JS module for inline-style patterns.
+- Optional community locale packs (locales/<code>.json merged over the
+  English core with a strict allowlist; core stays English-only).
+- Accessibility: WCAG 2.2 AA pass (skip link, aria-current, labelled
+  selection controls, scope=col report tables).
+- k6 load-test package (docs/load-test/): SSO-burst script + method; the
+  results table is filled on first operator run.
+
+Deeper lifecycle (already in the tree, finalised here):
+- Credential status card, onboarding wizard, domain settings editor,
+  account-recovery card.
+- CI integration now runs against kanidm/server:1.10.5 AND 1.11.0 and
+  mirrors the new flows (batched membership, expiry set/clear,
+  credential-status read); release.yml attaches zip+sha256 to tag
+  releases and publishes the UI image to GHCR.
+
+Fixed: blank page at /admin without trailing slash (generated Caddyfile
+now redirects /admin → /admin/).
+
+67/67 self-tests · zero runtime dependencies · MIT.
+```
+
+### Tag
+
+```
+git tag -a v1.3.0 -m "Shenasa v1.3.0 — operations at scale + deeper lifecycle (Kanidm 1.10/1.11)"
+git push origin main v1.3.0
+```
+
+Pushing the tag triggers `.github/workflows/release.yml`, which runs the
+test gate and attaches `shenasa-admin-v1.3.0.zip` + `.sha256` to the
+release automatically, and pushes `ghcr.io/mirzamohamadi/shenasa-ui` with
+`1.3.0` / `1.3` tags.
+
+### Release title
+
+```
+Shenasa v1.3.0 — operations at scale & deeper lifecycle (Kanidm 1.10/1.11)
+```
+
+### Release notes (paste as-is)
+
+````markdown
+Shenasa v1.3.0 completes the roadmap's **v1.2 "Operations at scale"** and
+**v1.3 "Deeper lifecycle"** milestones in one release (the v1.2 tag is
+skipped by product decision). Every new operation is composed exclusively
+of endpoints verified in the upstream sources of Kanidm **1.10.5** and
+**1.11.0** — no guessed APIs, no dead buttons.
+
+## Highlights
+
+- **Bulk user actions (dry-run first)**: multi-select users → add to
+  group (ONE batched request; `idm_*` role groups deliberately excluded)
+  or set/clear account expiry — clear uses Kanidm's empty-array purge
+  semantics, verified in `ModifyList::from_patch`.
+- **Group-membership CSV import** with a dry-run report of
+  adds/removes/no-ops/conflicts and reasons, applied batched per group.
+- **Governance reports**: accounts expiring within N days (+ CSV),
+  passkey-only adoption per group (permission-aware), and a client-side
+  diff of two group JSON exports to review role-group drift.
+- **Lifecycle depth**: credential status card, onboarding wizard
+  (person → baseline groups → QR hand-off), domain settings editor,
+  honest account-recovery card.
+- **Performance & hardening**: in-flight GET de-duplication; lists proven
+  at 5k+ entries; `style-src` no longer needs `'unsafe-inline'` anywhere;
+  WCAG 2.2 AA pass (skip link, aria-current, labelled controls).
+- **Optional community locale packs** (`locales/<code>.json`) — the
+  audited core stays English-only.
+- **k6 load-test package** (`docs/load-test/`) with interactive budgets
+  as thresholds.
+- **Fixed**: opening `/admin` (no trailing slash) no longer renders a
+  blank page — the generated Caddyfile redirects to `/admin/`.
+
+## Compatibility
+
+Kanidm **1.10.x** and **1.11.x** (CI integration runs against both Docker
+pins on every commit). Static SPA — unzip behind any hardened static file
+server or use the included Caddy/nginx configs or the
+`ghcr.io/mirzamohamadi/shenasa-ui` image.
+
+## Upgrade from v1.1.0
+
+Re-unzip and re-run `bash deploy/setup.sh <your-domain>` (repeatable,
+idempotent). Note the re-run rotates the `idm_admin` recovery password
+(bootstrap re-runs) — then hard-refresh (Ctrl+F5) and sign in once.
+
+67/67 self-tests · zero runtime dependencies · MIT.
+````

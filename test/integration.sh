@@ -134,6 +134,39 @@ api GET "/v1/group/$GROUP" | jq -e --arg m "$PERSON" \
   || die "verify membership failed"
 log "membership verified."
 
+# --- 5b. v1.3 flows: batched membership, expiry PATCH (incl. purge), cred status
+PERSON2=it_user2_$$
+log "creating second person $PERSON2 for v1.3 batch checks…"
+api POST /v1/person "$(jq -nc --arg n "$PERSON2" '{attrs:{name:[$n], displayname:["IT User Two"]}}')" >/dev/null \
+  || die "create second person failed"
+
+log "batched membership add (ONE POST, two members — Shenasa bulk add-to-group)…"
+api POST "/v1/group/$GROUP/_attr/member" "$(jq -nc --arg a "$PERSON@localhost" --arg b "$PERSON2@localhost" '[$a,$b]')" >/dev/null \
+  || api POST "/v1/group/$GROUP/_attr/member" "$(jq -nc --arg a "$PERSON" --arg b "$PERSON2" '[$a,$b]')" >/dev/null \
+  || die "batched member add failed"
+api GET "/v1/group/$GROUP" | jq -e --arg m "$PERSON2" \
+  '([.attrs.member[]? | split("@")[0]] | index($m)) != null' >/dev/null \
+  || die "verify batched membership failed"
+
+log "setting account expiry via PATCH (Shenasa bulk set-expiry)…"
+api PATCH "/v1/person/$PERSON2" "$(jq -nc '{attrs:{account_expire:["2030-01-01T00:00:00Z"]}}')" >/dev/null \
+  || die "set expiry failed"
+api GET "/v1/person/$PERSON2" | jq -e \
+  '(.attrs.account_expire[0] // "") | startswith("2030-01-01")' >/dev/null \
+  || die "verify expiry failed"
+
+log "clearing expiry via purge (EMPTY ARRAY — ModifyList::from_patch)…"
+api PATCH "/v1/person/$PERSON2" "$(jq -nc '{attrs:{account_expire:[]}}')" >/dev/null \
+  || die "clear expiry failed"
+api GET "/v1/person/$PERSON2" | jq -e \
+  '((.attrs.account_expire // []) | length) == 0' >/dev/null \
+  || die "verify purge failed"
+
+log "reading credential status (Shenasa creds card / adoption report)…"
+api GET "/v1/person/$PERSON2/_credential/_status" | jq -e 'has("creds")' >/dev/null \
+  || die "credential status read failed"
+log "v1.3 batch flows verified."
+
 log "granting RBAC role (idm_service_desk membership)…"
 api POST "/v1/group/idm_service_desk/_attr/member" "$(jq -nc --arg m "$PERSON@localhost" '[$m]')" >/dev/null \
   || api POST "/v1/group/idm_service_desk/_attr/member" "$(jq -nc --arg m "$PERSON" '[$m]')" >/dev/null \
@@ -171,6 +204,40 @@ api POST "/v1/oauth2/$CLIENT/_scopemap/idm_service_desk@localhost" \
   '["openid","profile","email","groups"]' >/dev/null \
   || die "scope map grant failed"
 
+# --- 6b. Basic (confidential) client + generated secret ----------------------
+# POST /v1/oauth2/_basic takes the SAME attrs as _public (name, displayname,
+# landing, strict). The secret is NEVER sent; Kanidm generates it and
+# GET /v1/oauth2/{id}/_basic_secret returns it as a JSON string.
+BASIC=it_basic_client
+log "creating basic OAuth2 client $BASIC…"
+STATUS=$(curl -sS --cacert "$WORK/ca.pem" -o "$WORK/basic.json" -w '%{http_code}' \
+  -H "Authorization: Bearer $TOKEN" -c "$JAR" -b "$JAR" \
+  -H 'Content-Type: application/json' -H 'Accept: application/json' \
+  -X POST "$ORIGIN/v1/oauth2/_basic" -d "$(jq -nc --arg id "$BASIC" \
+  '{attrs:{name:[$id], displayname:["IT Basic"],
+           oauth2_rs_origin_landing:["https://localhost/app"],
+           oauth2_strict_redirect_uri:["true"]}}')")
+if [ "$STATUS" != "200" ] && [ "$STATUS" != "201" ]; then
+  cat "$WORK/basic.json" >&2 || true
+  die "basic OAuth2 client create failed (HTTP $STATUS)"
+fi
+log "reading generated basic secret (GET /v1/oauth2/{id}/_basic_secret)…"
+SECRET=$(api GET "/v1/oauth2/$BASIC/_basic_secret") || die "GET _basic_secret failed"
+SECRET_VAL=$(printf '%s' "$SECRET" | jq -r 'if type == "string" then . elif . == null then "" else tostring end')
+[ -n "$SECRET_VAL" ] && [ "$SECRET_VAL" != "null" ] || {
+  printf '%s\n' "$SECRET" >&2
+  die "basic secret was empty — Kanidm should generate one on _basic create"
+}
+api PATCH "/v1/oauth2/$BASIC" "$(jq -nc \
+  '{attrs:{oauth2_rs_origin:["https://localhost/app"]}}')" >/dev/null \
+  || die "basic client origin configure failed"
+api GET "/v1/oauth2/$BASIC" | jq -e \
+  '(.attrs.class // []) | index("oauth2_resource_server_basic") != null' >/dev/null \
+  || die "basic client class missing oauth2_resource_server_basic"
+api DELETE "/v1/oauth2/$BASIC" >/dev/null \
+  || die "basic client delete failed"
+log "basic client create + secret + origin + delete verified."
+
 log "checking OIDC discovery at the origin root (never /v1)…"
 DOC=$(curl -fsS --cacert "$WORK/ca.pem" "$ORIGIN/oauth2/openid/$CLIENT/.well-known/openid-configuration") \
   || die "discovery doc missing"
@@ -178,4 +245,4 @@ printf '%s' "$DOC" | jq -e '.authorization_endpoint | test("^https://[^/]+/ui/oa
   || die "authorization_endpoint is not the /ui/oauth2 entry point at the origin root"
 
 log "cleanup handled by trap."
-printf '\n[integration] PASS — person/group/membership/RBAC created and verified; SSO endpoints OK.\n'
+printf '\n[integration] PASS — person/group/membership/RBAC created and verified; public + basic OAuth2 and SSO endpoints OK.\n'

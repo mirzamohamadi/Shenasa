@@ -34,6 +34,13 @@
 
   function getConfig() { return global.ShenaConfig; }
 
+  // In-flight de-duplication for idempotent GETs: rapid navigation (or two
+  // widgets needing the same list) must not fan out duplicate requests —
+  // the SECOND caller simply awaits the promise already in flight. The map
+  // is cleared as soon as the request settles, so nothing is ever cached
+  // beyond the flight window (no stale reads, no invalidation burden).
+  var _inflightGets = Object.create(null);
+
   var Api = {
     ApiError: ApiError,
 
@@ -41,7 +48,22 @@
       return getConfig().apiUrl() + path;
     },
 
-    _request: async function (method, path, body, bearer) {
+    _request: function (method, path, body, bearer) {
+      var dedup = method === 'GET' && bearer === undefined;
+      if (dedup) {
+        var key = this._url(path);
+        var pending = _inflightGets[key];
+        if (pending) return pending;
+        var p = this._doRequest(method, path, body, bearer);
+        _inflightGets[key] = p;
+        var clear = function () { if (_inflightGets[key] === p) delete _inflightGets[key]; };
+        p.then(clear, clear);
+        return p;
+      }
+      return this._doRequest(method, path, body, bearer);
+    },
+
+    _doRequest: async function (method, path, body, bearer) {
       var headers = { 'Accept': 'application/json' };
       var u = global.Store && global.Store.user;
       var token = bearer || (u && u.token);
@@ -111,6 +133,7 @@
         if (!Object.prototype.hasOwnProperty.call(attrs, k)) continue;
         var v = attrs[k];
         if (v === undefined || v === null || v === '') continue;
+        // Empty arrays are kept (attribute purge). Non-empty strings wrap.
         out[k] = (typeof v.length === 'number' && typeof v !== 'string') ? v : [v];
       }
       return { attrs: out };
@@ -129,7 +152,10 @@
     updatePerson: function (name, data) {
       var attrs = {};
       if (data.displayname !== undefined) attrs.displayname = data.displayname;
-      if (data.mail !== undefined) attrs.mail = data.mail;
+      // Empty string → empty array, which is Kanidm's attribute-purge form
+      // (same as bulk expiry clear). Skipping '' used to make "clear mail"
+      // a silent no-op.
+      if (data.mail !== undefined) attrs.mail = data.mail === '' ? [] : data.mail;
       if (data.validFrom !== undefined) attrs.account_valid_from = data.validFrom;
       if (data.expire !== undefined) attrs.account_expire = data.expire;
       return Api._request('PATCH', '/person/' + enc(name), Api._entry(attrs));
@@ -159,11 +185,21 @@
     deleteGroup: function (name) { return Api._request('DELETE', '/group/' + enc(name)); },
     // Kanidm attribute operations: POST extends an attribute's values,
     // DELETE removes the listed values (see docs/openapi.yaml).
+    // The _attr/member endpoints accept Vec<String>, so bulk membership
+    // changes are ONE request per group — not one request per user.
+    // (Routes: group_id_attr_post/delete, server/core/src/https/v1.rs; the
+    // POST appends values, the DELETE removes the given values.)
     addGroupMember: function (group, member) {
       return Api._request('POST', '/group/' + enc(group) + '/_attr/member', [member]);
     },
+    addGroupMembers: function (group, members) {
+      return Api._request('POST', '/group/' + enc(group) + '/_attr/member', members.slice());
+    },
     removeGroupMember: function (group, member) {
       return Api._request('DELETE', '/group/' + enc(group) + '/_attr/member', [member]);
+    },
+    removeGroupMembers: function (group, members) {
+      return Api._request('DELETE', '/group/' + enc(group) + '/_attr/member', members.slice());
     },
 
     // ---- Membership helpers --------------------------------------------
@@ -396,7 +432,29 @@
     },
 
     // ---- Domain ---------------------------------------------------------
-    getDomain: function () { return Api._request('GET', '/domain'); }
+    getDomain: function () { return Api._request('GET', '/domain'); },
+
+    // ---- v1.3: credential status & domain attributes -----------------------
+    // Per-user credential TYPE status (never the secrets themselves):
+    // GET /v1/person/{id}/_credential/_status → { creds: [{ uuid, type_ }] }.
+    // The server returns an EMPTY list when nothing is set (v1.rs maps
+    // NoMatchingAttributes → 200); type_ serde: "Password" |
+    // "GeneratedPassword" | { "Passkey": [labels] } |
+    // { "PasswordMfa": [[totpLabels], [securityKeyLabels], backupCodeCount] }
+    // (proto/src/internal/credupdate.rs). Read requires the credential-reset
+    // ACPs — calls may 403 for plain people readers and the UI tolerates it.
+    getCredentialStatus: function (name) {
+      return Api._request('GET', '/person/' + enc(name) + '/_credential/_status');
+    },
+    // Domain attribute read/write (domain_admins; idm_acp_domain_admin).
+    // GET → Option<Vec<String>>; PUT body is a BARE array of strings
+    // (booleans as "true"/"false" — libs/client/src/domain.rs).
+    getDomainAttr: function (attr) {
+      return Api._request('GET', '/domain/_attr/' + enc(attr));
+    },
+    putDomainAttr: function (attr, values) {
+      return Api._request('PUT', '/domain/_attr/' + enc(attr), values);
+    }
   };
 
   global.Api = Api;
